@@ -20,6 +20,130 @@ if TYPE_CHECKING:
     from instinctlab.sensors.noisy_camera import NoisyGroupedRayCasterCamera
 
 
+
+
+def foot_tactile(env, sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_tactile")):
+    sensor = env.scene.sensors[sensor_cfg.name]   
+    return sensor.data.force_N                    # (N, 2, 120)
+
+
+def _resolve_stage_to_tactile_ids(stage_sensor, tactile_sensor, num_feet: int) -> list[int]:
+    stage_names = list(getattr(stage_sensor, "body_names", []))
+    tactile_names = list(getattr(tactile_sensor, "body_names", []))
+    num_tactile = int(getattr(tactile_sensor, "num_bodies", len(tactile_names)))
+    if num_tactile <= 0:
+        return [0 for _ in range(num_feet)]
+
+    if not stage_names or not tactile_names:
+        ids = list(range(min(num_feet, num_tactile)))
+    else:
+        tactile_name_to_id = {name: idx for idx, name in enumerate(tactile_names)}
+        ids = []
+        for stage_name in stage_names[:num_feet]:
+            mapped_id = tactile_name_to_id.get(stage_name, len(ids))
+            ids.append(int(mapped_id))
+
+    if not ids:
+        ids = list(range(min(num_feet, num_tactile)))
+    while len(ids) < num_feet:
+        ids.append(len(ids))
+    return [int(min(max(idx, 0), num_tactile - 1)) for idx in ids[:num_feet]]
+
+
+def foot_contact_state(
+    env: "ManagerBasedEnv",
+    stage_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_stage_filter"),
+    tactile_sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_tactile"),
+) -> torch.Tensor:
+    """Per-foot low-dimensional contact state for actor/critic observations.
+
+    Per-foot feature order (8 dims):
+    [F, cop_x, cop_y, contact_area_ratio, theta, vz, rho_peak, rho_fore]
+    """
+    stage_sensor = None
+    tactile_sensor = None
+    try:
+        stage_sensor = env.scene.sensors[stage_sensor_cfg.name]
+    except KeyError:
+        stage_sensor = None
+    try:
+        tactile_sensor = env.scene.sensors[tactile_sensor_cfg.name]
+    except KeyError:
+        tactile_sensor = None
+
+    num_envs = int(getattr(env, "num_envs", 0))
+    num_feet = 2
+    if stage_sensor is not None:
+        num_feet = int(getattr(stage_sensor, "num_bodies", num_feet))
+    elif tactile_sensor is not None:
+        num_feet = int(getattr(tactile_sensor, "num_bodies", num_feet))
+
+    if stage_sensor is None or tactile_sensor is None or num_envs <= 0 or num_feet <= 0:
+        return torch.zeros((max(num_envs, 0), max(num_feet, 0), 8), device=env.device, dtype=torch.float32)
+
+    stage_data = stage_sensor.data
+    tactile_data = tactile_sensor.data
+    tactile_ids = _resolve_stage_to_tactile_ids(stage_sensor, tactile_sensor, num_feet)
+
+    total_force = torch.nan_to_num(
+        tactile_data.total_normal_force[:, tactile_ids],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp_min(0.0)
+    cop_2d = torch.nan_to_num(
+        tactile_data.cop_b[:, tactile_ids, :],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    contact_area_ratio = torch.nan_to_num(
+        tactile_data.contact_area_ratio[:, tactile_ids],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+    theta = torch.nan_to_num(
+        stage_data.foot_theta[:, :num_feet],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    vz = torch.nan_to_num(
+        stage_data.foot_vz[:, :num_feet],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    rho_peak = torch.nan_to_num(
+        stage_data.rho_peak[:, :num_feet],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp_min(0.0)
+    rho_fore = torch.nan_to_num(
+        stage_data.rho_fore[:, :num_feet],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+
+    obs = torch.cat(
+        (
+            total_force.unsqueeze(-1),
+            cop_2d,
+            contact_area_ratio.unsqueeze(-1),
+            theta.unsqueeze(-1),
+            vz.unsqueeze(-1),
+            rho_peak.unsqueeze(-1),
+            rho_fore.unsqueeze(-1),
+        ),
+        dim=-1,
+    )
+    return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+
 def _debug_visualize_image(
     image: torch.Tensor,
     scale_up_vis: int = 5,

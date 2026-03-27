@@ -14,7 +14,7 @@ import cli_args  # isort: skip
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play an RL agent with Instinct-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
-parser.add_argument("--video_length", type=int, default=3000, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_length", type=int, default=2000, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_start_step", type=int, default=0, help="Start step for the simulation.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."

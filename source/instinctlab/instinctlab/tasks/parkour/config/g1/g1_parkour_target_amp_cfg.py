@@ -17,14 +17,21 @@ from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMoti
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
 from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg
 
+from instinctlab.sensors.contact_stage import ContactStageCfg
+from instinctlab.sensors.foot_tactile import FootTactileCfg, FootTactileDiffusionCfg, FootTactileNoiseCfg
+from instinctlab.tasks.parkour.config.g1.foot_tactile_geometry import make_ankle_roll_foot_tactile_template_cfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
+
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
 G1_CFG = copy.deepcopy(G1_29DOF_TORSOBASE_POPSICLE_CFG)
 G1_CFG.spawn.merge_fixed_joints = True
 G1_CFG.init_state.pos = (0.0, 0.0, 0.9)
 G1_with_shoe_CFG = copy.deepcopy(G1_CFG)
 G1_with_shoe_CFG.spawn.asset_path = os.path.abspath(
-    f"{__file_dir__}/../../urdf/g1_29dof_torsoBase_popsicle_with_shoe.urdf"
+    f"{__file_dir__}/../../urdf/g1_29dof_torsoBase_popsicle_with_shoe_copy.urdf"
 )
+G1_with_shoe_CFG.spawn.collider_type = "convex_decomposition"
 
 
 @configclass
@@ -98,6 +105,58 @@ class ShoeConfigMixin:
         self.scene.leg_volume_points.points_generator.z_min = -0.063
         self.scene.leg_volume_points.points_generator.z_max = -0.023
         self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
+        # foot tactile sensor config
+        self.scene.foot_tactile = FootTactileCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
+            template_cfg=make_ankle_roll_foot_tactile_template_cfg(),
+            taxel_z_offset=-0.038,
+            raycast_offset=0.0003,
+            pad_thickness=0.0014,
+            max_support_dist=0.004,
+            support_weight_band=0.004,
+            support_weight_rho=50.0,
+            alignment_gate_a0=0.3,
+            alignment_gate_q=1.5,
+            align_mix=0.4,
+            min_force_threshold=5.0,
+            active_taxel_threshold=0.5,
+            diffusion_cfg=FootTactileDiffusionCfg(
+                enable_neighbor_diffusion=True,
+                diffusion_knn=4,
+                diffusion_alpha=0.10,
+                diffusion_iters=1,
+                preserve_total_force_after_diffusion=True,
+            ),
+            noise_cfg=FootTactileNoiseCfg(
+                enable=False,
+                force_relative_error_max=0.08,
+                delay_prob=0.0,
+                max_delay_frames=2,
+            ),
+            update_period=0.01,
+            debug_vis=False,
+        )
+        self.scene.contact_stage_filter = ContactStageCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
+            update_period=0.01,
+            debug_vis=False,
+        )
+        self.events.bind_foot_tactile = EventTerm(
+            func=mdp.bind_foot_tactile,
+            mode="startup",
+            params={
+                "tactile_cfg": SceneEntityCfg("foot_tactile"),
+                "contact_forces_cfg": SceneEntityCfg("contact_forces_foot"),
+            },
+        )
+        self.events.bind_contact_stage_filter = EventTerm(
+            func=mdp.bind_contact_stage_filter,
+            mode="startup",
+            params={
+                "stage_cfg": SceneEntityCfg("contact_stage_filter"),
+                "tactile_cfg": SceneEntityCfg("foot_tactile"),
+            },
+        )
 
 
 @configclass
@@ -145,3 +204,31 @@ class G1ParkourEnvCfg_PLAY(G1ParkourRoughEnvCfg_PLAY, ShoeConfigMixin):
     def __post_init__(self):
         super().__post_init__()
         self.apply_shoe_config()
+
+
+@configclass
+class G1ParkourEnvCfg_STAND_DEBUG(G1ParkourEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.episode_length_s = 1e10
+
+        # 彻底关闭终止
+        self.terminations.time_out = None
+        self.terminations.terrain_out_bound = None
+        self.terminations.base_contact = None
+        self.terminations.bad_orientation = None
+        self.terminations.root_height = None
+
+
+        self.events.physics_material = None
+        # 1) 关掉 base 随机速度和姿态扰动
+        self.events.reset_base.params["pose_range"] = {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)}
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
+            "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
+        }
+
+        # 2) 关掉 joint reset 偏移
+        self.events.reset_robot_joints.params["position_range"] = (0.0, 0.0)
+        self.events.reset_robot_joints.params["velocity_range"] = (0.0, 0.0)

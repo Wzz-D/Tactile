@@ -1,0 +1,95 @@
+请使用这一版简洁的 belief 机制。
+
+--------------------------------
+1. stage score
+--------------------------------
+先算：
+- s_sw
+- s_pre
+- s_land
+- s_st
+- s_push
+
+--------------------------------
+2. stage-specific 弱顺序先验
+--------------------------------
+定义自然前驱集合：
+- P(Swing) = {PushOff}
+- P(PreLanding) = {Swing}
+- P(Landing) = {PreLanding}
+- P(Stance) = {Landing}
+- P(PushOff) = {Stance}
+
+同时每个 stage 都允许 self-transition。
+
+构造先验分数：
+
+tilde_p_r =
+eps_prior
++ lambda_self[r] * b_prev[r]
++ lambda_prev[r] * sum_{j in P(r)} b_prev[j]
+⊙
+然后归一化得到 p_t。
+
+要求：
+- lambda_self 和 lambda_prev 做成每个 stage 各自的配置项或数组
+- 设计原则：
+  - Swing、Stance 自保持高一些
+  - PushOff 中等
+  - PreLanding、Landing 自保持较低
+- 这是软先验，不是硬状态机
+
+--------------------------------
+3. likelihood
+--------------------------------
+如果至少一个 stage 被激活（任意 s_r > 0）：
+ell_t = softmax(beta_score * [s_sw, s_pre, s_land, s_st, s_push])
+
+如果所有 stage 的 score 都为 0：
+ell_t = p_t
+
+也就是说：
+- 当前观测有明确 stage 证据时，用 score 主导
+- 当前观测没有明确证据时，用弱顺序先验维持
+
+--------------------------------
+4. belief 融合更新
+--------------------------------
+b_raw = normalize(ell_t * p_t)
+
+再做 EMA：
+b_t = (1 - ema_stage) * b_prev + ema_stage * b_raw
+
+要求：
+- ema_stage 这次请设得更偏向当前帧，而不是过度依赖历史
+- 推荐默认值显著高于之前版本，例如 0.6 ~ 0.8 之间，请选一个合理值并写清楚
+- belief 每行和为 1（数值误差范围内）
+- 不出现 NaN / inf
+- dominant_stage_id 必须和 argmax(b_t) 一致
+
+--------------------------------
+5. 最小驻留时间
+--------------------------------
+当前版本继续保留为可选项，但默认关闭：
+- enable_min_stage_duration = False
+
+先不要主动依赖它稳定 stage，当前主要依赖：
+- 硬资格判定 E
+- stage-specific prior
+- EMA
+
+================================
+七、confidence
+================================
+
+请保留 confidence，但不要引入 anomaly score。
+
+定义：
+confidence = 1 - entropy(b_t) / log(5)
+
+要求：
+- confidence 范围在 [0, 1]
+- belief 越尖锐，confidence 越高
+- belief 越分散，confidence 越低
+
+暂时只存储和 debug，不接 reward。

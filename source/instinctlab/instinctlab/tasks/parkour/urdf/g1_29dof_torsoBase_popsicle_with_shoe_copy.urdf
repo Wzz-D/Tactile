@@ -189,45 +189,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0.075 -0.026 -0.048" rpy="0 1.5708 0"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
             <geometry>
-                <cylinder radius="0.01" length="0.05"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.0395 -0.018 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.008" length="0.167"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 -0.01 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.182"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 0 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.186"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 0.01 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.182"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.0395 0.018 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.008" length="0.167"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.075 0.026 -0.048" rpy="0 1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.05"/>
+                <mesh filename="../../../assets/resources/unitree_g1/meshes/left_ankle_roll_link.STL"/>
             </geometry>
         </collision>
     </link>
@@ -381,45 +345,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0.075 -0.026 -0.048" rpy="0 1.5708 0"/>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
             <geometry>
-                <cylinder radius="0.01" length="0.05"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.0395 -0.018 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.008" length="0.167"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 -0.01 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.182"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 0 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.186"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.039 0.01 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.182"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.0395 0.018 -0.048" rpy="0 -1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.008" length="0.167"/>
-            </geometry>
-        </collision>
-        <collision>
-            <origin xyz="0.075 0.026 -0.048" rpy="0 1.5708 0"/>
-            <geometry>
-                <cylinder radius="0.01" length="0.05"/>
+                <mesh filename="../../../assets/resources/unitree_g1/meshes/right_ankle_roll_link.STL"/>
             </geometry>
         </collision>
     </link>

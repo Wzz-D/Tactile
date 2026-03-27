@@ -37,8 +37,36 @@ from instinctlab.utils.noise import (
     RandomGaussianNoiseCfg,
     RangeBasedGaussianNoiseCfg,
 )
+from instinctlab.sensors.foot_tactile import FootTactileCfg
+
 
 __file_dir__ = os.path.dirname(os.path.realpath(__file__))
+
+_STAGE_REWARD_V1_COMMON_PARAMS = {
+    "enable_stage_reward_v1": True,
+    "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
+    "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
+    "asset_cfg": SceneEntityCfg("robot"),
+    "pre_vz_ref": 0.24,
+    "pre_az_ref": 6.00,
+    "pre_az_filter_alpha": 0.70,
+    "land_dF_ref": 70000.0,
+    "body_weight": 350.0,
+    "cop_margin_max": 0.038,
+    "contact_quality_eps": 1e-6,
+    "enable_contact_quality_reward": True,
+    "w_cop": 0.24,
+    "w_area": 0.18,
+    "enable_contact_quality_on_landing": True,
+    "enable_contact_quality_on_stance": True,
+    "enable_contact_quality_on_pushoff": True,
+    "gamma_land": 0.6,
+    "gamma_st": 1.0,
+    "gamma_push": 0.6,
+    "enable_stage_reward_warmup": True,
+    "stage_reward_warmup_steps": 10000,
+    "enable_self_check": True,
+}
 
 ##
 # Scene definition
@@ -48,15 +76,15 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=3,
     num_rows=10,
-    num_cols=20,
+    num_cols=10,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
     use_cache=False,
-    curriculum=True,
+    curriculum=False,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.05,
+            proportion=0.2,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -73,7 +101,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "perlin_rough_stand": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.05,
+            proportion=0,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -90,7 +118,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "square_gaps": terrain_gen.PerlinSquareGapTerrainCfg(
-            proportion=0.10,
+            proportion=0,
             gap_distance_range=(0.1, 0.7),
             gap_depth=(0.4, 0.6),
             platform_width=2.5,
@@ -109,7 +137,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.15,
+            proportion=0.4,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -136,7 +164,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_high": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -163,7 +191,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.15,
+            proportion=0.4,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -190,7 +218,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv_high": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -217,7 +245,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "boxes": terrain_gen.PerlinDiscreteObstaclesTerrainCfg(
-            proportion=0.10,
+            proportion=0,
             num_obstacles=20,
             obstacle_height_mode="fixed",
             obstacle_width_range=(0.8, 1.5),
@@ -242,7 +270,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "mesh_boxes": terrain_gen.PerlinMeshRandomMultiBoxTerrainCfg(
-            proportion=0.10,
+            proportion=0,
             box_height_mean=[0.1, 0.4],
             box_height_range=0.05,
             box_length_mean=0.4,
@@ -260,11 +288,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "hf_pyramid_slope_inv": terrain_gen.PerlinInvertedPyramidSlopedTerrainCfg(
-            proportion=0.10,
+            proportion=0.0,
             slope_range=(0.0, 0.7),
             platform_width=1.5,
             border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.0, 0.0, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -297,13 +325,13 @@ class SceneCfg(InteractiveSceneCfg):
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
-            static_friction=1.0,
+            static_friction=1.0,                                               
             dynamic_friction=1.0,
         ),
         visual_material=sim_utils.MdlFileCfg(
             mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
             project_uvw=True,
-            texture_scale=(0.25, 0.25),
+            texture_scale=(0.25, 0.25),                             
         ),
         debug_vis=False,
         virtual_obstacles={
@@ -316,6 +344,15 @@ class SceneCfg(InteractiveSceneCfg):
     # robots
     robot: ArticulationCfg = MISSING
     # sensors
+    contact_forces_foot = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+        update_period=0.0,
+        history_length=1,
+        track_air_time=True,
+        debug_vis = False
+    )
+
+
     left_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
@@ -420,6 +457,14 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
+        # foot_tactile = ObsTerm(
+        #     func=mdp.foot_tactile,
+        #     params={"sensor_cfg": SceneEntityCfg("foot_tactile")},
+        #     history_length=8,
+        #     flatten_history_dim=True,
+        #     noise=None,
+        # )
+
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
@@ -451,6 +496,16 @@ class ObservationsCfg:
             flatten_history_dim=True,
         )
         actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        foot_contact_state = ObsTerm(
+            func=mdp.foot_contact_state,
+            params={
+                "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
+                "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
+            },
+            history_length=4,
+            flatten_history_dim=True,
+            noise=None,
+        )
         depth_image = ObsTerm(
             func=mdp.delayed_visualizable_image,
             params={
@@ -491,6 +546,16 @@ class ObservationsCfg:
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, history_length=8, flatten_history_dim=True)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, history_length=8, flatten_history_dim=True)
         actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
+        foot_contact_state = ObsTerm(
+            func=mdp.foot_contact_state,
+            params={
+                "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
+                "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
+            },
+            history_length=4,
+            flatten_history_dim=True,
+            noise=None,
+        )
         depth_image = ObsTerm(
             func=mdp.delayed_visualizable_image,
             params={
@@ -754,6 +819,129 @@ class G1Rewards:
             "std": math.sqrt(0.05),
         },
     )
+
+    # Decompose stage reward into per-item terms for logging curves.
+    # The sum of these terms is equivalent to the previous `stage_reward_v1`.
+    stage_pre_v_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": True,
+            "w_pre_v": 0.24,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+        },
+    )
+    stage_pre_a_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": True,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.04,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+        },
+    )
+    stage_stance_cop_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": True,
+            "w_cop": 0.24,
+            "w_area": 0.0,
+        },
+    )
+    stage_stance_area_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": True,
+            "w_cop": 0.0,
+            "w_area": 0.18,
+        },
+    )
+    stage_landing_f_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": True,
+            "w_land_F": 0.24,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+        },
+    )
+    stage_landing_df_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": True,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.14,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+        },
+    )
+    stage_landing_rho_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": True,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.12,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+        },
+    )
+
     energy = RewTerm(
         func=mdp.motors_power_square,
         weight=-5e-5,
@@ -917,8 +1105,13 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
-        self.sim.physx.gpu_collision_stack_size = 2**29
+        # PhysX GPU memory buffers:
+        # - patch_count previously 327680, then 524288. New logs requested >= ~551894.
+        # - collision_stack_size previously 2^29, but logs requested >= ~610MB.
+        # Keep practical headroom for high-contact parkour scenes.
+        self.sim.physx.gpu_max_rigid_patch_count = 2**20          # 1,048,576
+        self.sim.physx.gpu_max_rigid_contact_count = 2**27        # 134,217,728
+        self.sim.physx.gpu_collision_stack_size = 2**30           # 1,073,741,824
         # update sensor update periods
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
