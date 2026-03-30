@@ -133,12 +133,12 @@ class ShoeConfigMixin:
                 delay_prob=0.0,
                 max_delay_frames=2,
             ),
-            update_period=0.01,
+            update_period=0.02,
             debug_vis=False,
         )
         self.scene.contact_stage_filter = ContactStageCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
-            update_period=0.01,
+            update_period=0.02,
             debug_vis=False,
         )
         self.events.bind_foot_tactile = EventTerm(
@@ -180,7 +180,7 @@ class G1ParkourRoughEnvCfg_PLAY(G1ParkourRoughEnvCfg):
         # spawn the robot randomly in the grid (instead of their terrain levels)
         # reduce the number of terrains to save memory
         if self.scene.terrain.terrain_generator is not None:
-            self.scene.terrain.terrain_generator.num_rows = 4
+            self.scene.terrain.terrain_generator.num_rows = 10
             self.scene.terrain.terrain_generator.num_cols = 10
 
         self.scene.leg_volume_points.debug_vis = True

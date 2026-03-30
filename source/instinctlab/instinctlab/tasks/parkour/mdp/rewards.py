@@ -292,10 +292,10 @@ class foot_cop_smoothness(ManagerTermBase):
 class contact_stage_reward_v1(ManagerTermBase):
     """Stage-aware reward V1: PreLanding + contact-phase dense terms + Landing event penalty."""
 
+    SWING_STAGE_ID = 0
     PRE_STAGE_ID = 1
     LANDING_STAGE_ID = 2
     STANCE_STAGE_ID = 3
-    PUSHOFF_STAGE_ID = 4
 
     def __init__(self, cfg: "RewardTermCfg", env: "ManagerBasedRLEnv"):
         super().__init__(cfg, env)
@@ -318,20 +318,25 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._prev_vz = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._az_initialized = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.bool)
         self._az_filt = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
+        self._prev_cop = torch.zeros((env.num_envs, self._num_feet, 2), device=env.device, dtype=torch.float32)
+        self._cop_initialized = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.bool)
 
         self._landing_active_prev = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.bool)
         self._landing_F_peak = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._landing_dF_peak = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._landing_rho_peak_max = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
 
+        self._debug_alpha_sw = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_alpha_pre = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_alpha_land = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_alpha_st = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_alpha_push = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
+        self._debug_r_sw_h = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_pre_v = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_pre_a = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_st_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_st_area = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
+        self._debug_r_st_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
+        self._debug_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_contact_phase_weight = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_contact = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_landing_event_penalty = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
@@ -343,10 +348,8 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_landing_window = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_enable_land = 0.0
         self._debug_enable_st = 0.0
-        self._debug_enable_push = 0.0
         self._debug_gamma_land = 0.0
         self._debug_gamma_st = 0.0
-        self._debug_gamma_push = 0.0
 
         self._resolve_sensor_handles(env)
         self._sync_num_feet_from_stage_sensor()
@@ -378,19 +381,24 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._prev_vz = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._az_initialized = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.bool)
         self._az_filt = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
+        self._prev_cop = torch.zeros((self._env.num_envs, num_feet, 2), device=self._env.device, dtype=torch.float32)
+        self._cop_initialized = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.bool)
         self._landing_active_prev = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.bool)
         self._landing_F_peak = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._landing_dF_peak = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._landing_rho_peak_max = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
 
+        self._debug_alpha_sw = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_alpha_pre = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_alpha_land = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_alpha_st = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_alpha_push = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
+        self._debug_r_sw_h = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_pre_v = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_pre_a = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_st_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_st_area = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
+        self._debug_r_st_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
+        self._debug_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_contact_phase_weight = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_contact = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_landing_event_penalty = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
@@ -542,18 +550,23 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._prev_vz[env_ids] = 0.0
         self._az_initialized[env_ids] = False
         self._az_filt[env_ids] = 0.0
+        self._prev_cop[env_ids] = 0.0
+        self._cop_initialized[env_ids] = False
         self._landing_active_prev[env_ids] = False
         self._landing_F_peak[env_ids] = 0.0
         self._landing_dF_peak[env_ids] = 0.0
         self._landing_rho_peak_max[env_ids] = 0.0
+        self._debug_alpha_sw[env_ids] = 0.0
         self._debug_alpha_pre[env_ids] = 0.0
         self._debug_alpha_land[env_ids] = 0.0
         self._debug_alpha_st[env_ids] = 0.0
-        self._debug_alpha_push[env_ids] = 0.0
+        self._debug_r_sw_h[env_ids] = 0.0
         self._debug_r_pre_v[env_ids] = 0.0
         self._debug_r_pre_a[env_ids] = 0.0
         self._debug_r_st_cop[env_ids] = 0.0
         self._debug_r_st_area[env_ids] = 0.0
+        self._debug_r_st_delta_cop[env_ids] = 0.0
+        self._debug_delta_cop[env_ids] = 0.0
         self._debug_contact_phase_weight[env_ids] = 0.0
         self._debug_r_contact[env_ids] = 0.0
         self._debug_landing_event_penalty[env_ids] = 0.0
@@ -567,14 +580,17 @@ class contact_stage_reward_v1(ManagerTermBase):
     def get_debug_dict(self, env_id: int) -> dict[str, torch.Tensor]:
         scalar_shape = (self._num_feet,)
         return {
+            "alpha_sw": self._debug_alpha_sw[env_id].detach().clone(),
             "alpha_pre": self._debug_alpha_pre[env_id].detach().clone(),
             "alpha_land": self._debug_alpha_land[env_id].detach().clone(),
             "alpha_st": self._debug_alpha_st[env_id].detach().clone(),
-            "alpha_push": self._debug_alpha_push[env_id].detach().clone(),
+            "r_sw_h": self._debug_r_sw_h[env_id].detach().clone(),
             "r_pre_v": self._debug_r_pre_v[env_id].detach().clone(),
             "r_pre_a": self._debug_r_pre_a[env_id].detach().clone(),
             "r_st_cop": self._debug_r_st_cop[env_id].detach().clone(),
             "r_st_area": self._debug_r_st_area[env_id].detach().clone(),
+            "r_st_delta_cop": self._debug_r_st_delta_cop[env_id].detach().clone(),
+            "delta_cop": self._debug_delta_cop[env_id].detach().clone(),
             "r_cop": self._debug_r_st_cop[env_id].detach().clone(),
             "r_area": self._debug_r_st_area[env_id].detach().clone(),
             "contact_phase_weight": self._debug_contact_phase_weight[env_id].detach().clone(),
@@ -591,10 +607,8 @@ class contact_stage_reward_v1(ManagerTermBase):
             "landing_window": self._debug_landing_window[env_id].detach().clone(),
             "enable_land": torch.full(scalar_shape, self._debug_enable_land, device=self._env.device, dtype=torch.float32),
             "enable_st": torch.full(scalar_shape, self._debug_enable_st, device=self._env.device, dtype=torch.float32),
-            "enable_push": torch.full(scalar_shape, self._debug_enable_push, device=self._env.device, dtype=torch.float32),
             "gamma_land": torch.full(scalar_shape, self._debug_gamma_land, device=self._env.device, dtype=torch.float32),
             "gamma_st": torch.full(scalar_shape, self._debug_gamma_st, device=self._env.device, dtype=torch.float32),
-            "gamma_push": torch.full(scalar_shape, self._debug_gamma_push, device=self._env.device, dtype=torch.float32),
         }
 
     def __call__(
@@ -604,6 +618,11 @@ class contact_stage_reward_v1(ManagerTermBase):
         tactile_sensor_cfg: Optional[SceneEntityCfg] = None,
         asset_cfg: Optional[SceneEntityCfg] = None,
         enable_stage_reward_v1: bool = True,
+        enable_swing_clearance_reward: bool = False,
+        w_swing_h: float = 0.08,
+        swing_h_ref: float = 0.07,
+        swing_command_name: str = "base_velocity",
+        swing_vel_threshold: float = 0.15,
         enable_prelanding_reward: bool = True,
         pre_vz_ref: float = 0.24,
         pre_az_ref: float = 7.0,
@@ -619,13 +638,14 @@ class contact_stage_reward_v1(ManagerTermBase):
         enable_contact_quality_reward: bool = True,
         enable_contact_quality_on_landing: bool = True,
         enable_contact_quality_on_stance: bool = True,
-        enable_contact_quality_on_pushoff: bool = True,
         gamma_land: float = 0.6,
         gamma_st: float = 1.0,
-        gamma_push: float = 0.6,
         cop_margin_max: float = 0.038,
         w_cop: float = 0.24,
         w_area: float = 0.18,
+        enable_stance_delta_cop_reward: bool = True,
+        w_st_delta_cop: float = 0.03,
+        delta_cop_ref: float = 0.01,
         contact_quality_eps: float = 1e-6,
         enable_stage_reward_warmup: bool = True,
         stage_reward_warmup_steps: int = 10000,
@@ -653,8 +673,8 @@ class contact_stage_reward_v1(ManagerTermBase):
         stage_data = self._stage_sensor.data
         tactile_data = self._tactile_sensor.data
 
-        if int(stage_data.stage_belief.shape[1]) != self._num_feet:
-            self._resize_buffers(int(stage_data.stage_belief.shape[1]))
+        if int(stage_data.stage_eligibility.shape[1]) != self._num_feet:
+            self._resize_buffers(int(stage_data.stage_eligibility.shape[1]))
             self._build_stage_to_tactile_index()
             self._build_outline_cache()
 
@@ -665,13 +685,27 @@ class contact_stage_reward_v1(ManagerTermBase):
         eps = 1e-6
         step_dt = max(float(env.step_dt), eps)
 
-        belief = torch.nan_to_num(stage_data.stage_belief, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        confidence = torch.nan_to_num(stage_data.stage_confidence, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        alpha = confidence.unsqueeze(-1) * belief
+        alpha = torch.nan_to_num(stage_data.stage_eligibility, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+        if alpha.shape[-1] <= self.STANCE_STAGE_ID:
+            raise RuntimeError(
+                "contact_stage_reward_v1 requires at least 4 stage channels "
+                "(Swing/PreLanding/Landing/Stance)."
+            )
+        alpha_sw = alpha[..., self.SWING_STAGE_ID]
         alpha_pre = alpha[..., self.PRE_STAGE_ID]
         alpha_land = alpha[..., self.LANDING_STAGE_ID]
         alpha_st = alpha[..., self.STANCE_STAGE_ID]
-        alpha_push = alpha[..., self.PUSHOFF_STAGE_ID]
+
+        h_eff = torch.nan_to_num(stage_data.h_eff, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        swing_h_ref = max(float(swing_h_ref), 1e-6)
+        r_sw_h = torch.clamp(h_eff / swing_h_ref, min=0.0, max=1.0)
+        command = env.command_manager.get_command(swing_command_name)
+        command_active = torch.logical_or(
+            torch.norm(command[:, :2], dim=1) > float(swing_vel_threshold),
+            torch.abs(command[:, 2]) > float(swing_vel_threshold),
+        ).unsqueeze(-1)
+        r_sw_h = torch.where(command_active, r_sw_h, torch.zeros_like(r_sw_h))
+        r_sw_h = torch.nan_to_num(r_sw_h, nan=0.0, posinf=0.0, neginf=0.0)
 
         vz = torch.nan_to_num(stage_data.foot_vz, nan=0.0, posinf=0.0, neginf=0.0)
         prev_vz = self._prev_vz
@@ -704,14 +738,11 @@ class contact_stage_reward_v1(ManagerTermBase):
 
         enable_land = 1.0 if bool(enable_contact_quality_on_landing) else 0.0
         enable_st = 1.0 if bool(enable_contact_quality_on_stance) else 0.0
-        enable_push = 1.0 if bool(enable_contact_quality_on_pushoff) else 0.0
         gamma_land = max(float(gamma_land), 0.0)
         gamma_st = max(float(gamma_st), 0.0)
-        gamma_push = max(float(gamma_push), 0.0)
         contact_phase_weight = (
             enable_land * gamma_land * alpha_land
             + enable_st * gamma_st * alpha_st
-            + enable_push * gamma_push * alpha_push
         )
         contact_phase_weight = torch.nan_to_num(contact_phase_weight, nan=0.0, posinf=0.0, neginf=0.0)
         r_contact = contact_phase_weight * r_contact_base
@@ -719,10 +750,25 @@ class contact_stage_reward_v1(ManagerTermBase):
         if not enable_contact_quality_reward:
             r_contact = torch.zeros_like(r_contact)
 
+        contact_active = stage_data.contact_active
+        delta_cop = torch.linalg.vector_norm(cop_b - self._prev_cop, dim=-1)
+        delta_cop = torch.nan_to_num(delta_cop, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        delta_cop_ref = max(float(delta_cop_ref), 1e-6)
+        r_st_delta_cop = torch.exp(-torch.square(delta_cop / delta_cop_ref))
+        valid_delta_cop = self._cop_initialized & contact_active
+        r_st_delta_cop = torch.where(valid_delta_cop, r_st_delta_cop, torch.zeros_like(r_st_delta_cop))
+        r_st_delta_cop = torch.nan_to_num(r_st_delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
+        self._prev_cop = torch.where(contact_active.unsqueeze(-1), cop_b, self._prev_cop)
+        self._cop_initialized = contact_active
+
         R_stage = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        if enable_swing_clearance_reward:
+            R_stage += (alpha_sw * float(w_swing_h) * r_sw_h).sum(dim=-1)
         if enable_prelanding_reward:
             R_stage += (alpha_pre * r_pre).sum(dim=-1)
         R_stage += r_contact.sum(dim=-1)
+        if enable_stance_delta_cop_reward:
+            R_stage += (alpha_st * float(w_st_delta_cop) * r_st_delta_cop).sum(dim=-1)
 
         landing_event_penalty_per_foot = torch.zeros_like(alpha_pre)
         R_landing_event = torch.zeros_like(R_stage)
@@ -802,14 +848,17 @@ class contact_stage_reward_v1(ManagerTermBase):
                     warmup_scale = min(common_steps / float(warmup_steps), 1.0)
         reward = torch.nan_to_num((R_stage + R_landing_event) * float(warmup_scale), nan=0.0, posinf=0.0, neginf=0.0)
 
+        self._debug_alpha_sw[:] = torch.nan_to_num(alpha_sw, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_alpha_pre[:] = torch.nan_to_num(alpha_pre, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_alpha_land[:] = torch.nan_to_num(alpha_land, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_alpha_st[:] = torch.nan_to_num(alpha_st, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_alpha_push[:] = torch.nan_to_num(alpha_push, nan=0.0, posinf=0.0, neginf=0.0)
+        self._debug_r_sw_h[:] = torch.nan_to_num(r_sw_h, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_pre_v[:] = torch.nan_to_num(r_pre_v, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_pre_a[:] = torch.nan_to_num(r_pre_a, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_st_cop[:] = torch.nan_to_num(r_cop, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_st_area[:] = torch.nan_to_num(r_area, nan=0.0, posinf=0.0, neginf=0.0)
+        self._debug_r_st_delta_cop[:] = torch.nan_to_num(r_st_delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
+        self._debug_delta_cop[:] = torch.nan_to_num(delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_contact_phase_weight[:] = torch.nan_to_num(contact_phase_weight, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_contact[:] = torch.nan_to_num(r_contact, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_landing_event_penalty[:] = landing_event_penalty_per_foot
@@ -821,10 +870,8 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_landing_window[:] = stage_data.landing_window.to(dtype=torch.float32)
         self._debug_enable_land = enable_land
         self._debug_enable_st = enable_st
-        self._debug_enable_push = enable_push
         self._debug_gamma_land = gamma_land
         self._debug_gamma_st = gamma_st
-        self._debug_gamma_push = gamma_push
 
         if enable_self_check:
             if not torch.isfinite(az).all():

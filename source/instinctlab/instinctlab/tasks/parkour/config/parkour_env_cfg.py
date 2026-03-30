@@ -47,6 +47,11 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
     "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
     "asset_cfg": SceneEntityCfg("robot"),
+    "enable_swing_clearance_reward": True,
+    "w_swing_h": 0.10,
+    "swing_h_ref": 0.12,
+    "swing_command_name": "base_velocity",
+    "swing_vel_threshold": 0.15,
     "pre_vz_ref": 0.24,
     "pre_az_ref": 6.00,
     "pre_az_filter_alpha": 0.70,
@@ -57,14 +62,15 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "enable_contact_quality_reward": True,
     "w_cop": 0.24,
     "w_area": 0.18,
-    "enable_contact_quality_on_landing": True,
+    "enable_stance_delta_cop_reward": True,
+    "w_st_delta_cop": 0.0,
+    "delta_cop_ref": 0.01,
+    "enable_contact_quality_on_landing": False,
     "enable_contact_quality_on_stance": True,
-    "enable_contact_quality_on_pushoff": True,
-    "gamma_land": 0.6,
+    "gamma_land": 0.0,
     "gamma_st": 1.0,
-    "gamma_push": 0.6,
     "enable_stage_reward_warmup": True,
-    "stage_reward_warmup_steps": 10000,
+    "stage_reward_warmup_steps": 8000,
     "enable_self_check": True,
 }
 
@@ -84,7 +90,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     curriculum=False,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.2,
+            proportion=0.0,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -142,7 +148,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0, 0, 0, 0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -191,7 +197,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.4,
+            proportion=0.0,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -839,6 +845,28 @@ class G1Rewards:
             "w_area": 0.0,
         },
     )
+    stage_swing_clearance_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_swing_clearance_reward": True,
+            "w_swing_h": 0.10,
+            "swing_h_ref": 0.12,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+            "enable_stance_delta_cop_reward": False,
+            "w_st_delta_cop": 0.0,
+        },
+    )
     stage_pre_a_v1 = RewTerm(
         func=mdp.contact_stage_reward_v1,
         weight=1.0,
@@ -888,6 +916,26 @@ class G1Rewards:
             "enable_contact_quality_reward": True,
             "w_cop": 0.0,
             "w_area": 0.18,
+        },
+    )
+    stage_stance_delta_cop_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+            "enable_stance_delta_cop_reward": True,
+            "w_st_delta_cop": 0.03,
+            "delta_cop_ref": 0.01,
         },
     )
     stage_landing_f_v1 = RewTerm(

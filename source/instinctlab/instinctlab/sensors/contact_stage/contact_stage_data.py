@@ -30,18 +30,8 @@ class ContactStageData:
     tau_on: torch.Tensor = MISSING
     tau_off: torch.Tensor = MISSING
     tau_stage: torch.Tensor = MISSING
-    land_trigger: torch.Tensor = MISSING
-    land_maintain: torch.Tensor = MISSING
-    land_active: torch.Tensor = MISSING
-    stance_during_landing_scale: torch.Tensor = MISSING
 
     stage_eligibility: torch.Tensor = MISSING
-    stage_quality: torch.Tensor = MISSING
-    stage_scores: torch.Tensor = MISSING
-    stage_likelihood: torch.Tensor = MISSING
-    stage_prior: torch.Tensor = MISSING
-    stage_belief: torch.Tensor = MISSING
-    stage_confidence: torch.Tensor = MISSING
     dominant_stage_id: torch.Tensor = MISSING
 
     @staticmethod
@@ -52,7 +42,6 @@ class ContactStageData:
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
     ) -> "ContactStageData":
-        belief = torch.full((num_envs, num_feet, num_stages), 1.0 / float(num_stages), device=device, dtype=dtype)
         return ContactStageData(
             h_eff=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
             foot_vz=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
@@ -73,16 +62,6 @@ class ContactStageData:
             tau_on=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
             tau_off=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
             tau_stage=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
-            land_trigger=torch.zeros((num_envs, num_feet), device=device, dtype=torch.bool),
-            land_maintain=torch.zeros((num_envs, num_feet), device=device, dtype=torch.bool),
-            land_active=torch.zeros((num_envs, num_feet), device=device, dtype=torch.bool),
-            stance_during_landing_scale=torch.ones((num_envs, num_feet), device=device, dtype=dtype),
             stage_eligibility=torch.zeros((num_envs, num_feet, num_stages), device=device, dtype=dtype),
-            stage_quality=torch.zeros((num_envs, num_feet, num_stages), device=device, dtype=dtype),
-            stage_scores=torch.zeros((num_envs, num_feet, num_stages), device=device, dtype=dtype),
-            stage_likelihood=torch.zeros((num_envs, num_feet, num_stages), device=device, dtype=dtype),
-            stage_prior=torch.zeros((num_envs, num_feet, num_stages), device=device, dtype=dtype),
-            stage_belief=belief,
-            stage_confidence=torch.zeros((num_envs, num_feet), device=device, dtype=dtype),
             dominant_stage_id=torch.zeros((num_envs, num_feet), device=device, dtype=torch.long),
         )

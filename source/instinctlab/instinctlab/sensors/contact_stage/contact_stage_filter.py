@@ -5,7 +5,6 @@ from typing import Any, Optional, Union
 
 import numpy as np
 import torch
-import torch.nn.functional as torch_f
 
 import omni.physics.tensors.impl.api as physx
 
@@ -19,21 +18,19 @@ from .contact_stage_data import ContactStageData
 
 
 class ContactStageFilter(SensorBase):
-    """Independent per-foot 5-stage contact filter driven by tactile + kinematics."""
+    """Independent per-foot 4-stage contact filter driven by tactile + kinematics."""
 
     STAGE_SWING = 0
     STAGE_PRELANDING = 1
     STAGE_LANDING = 2
     STAGE_STANCE = 3
-    STAGE_PUSHOFF = 4
-    NUM_STAGES = 5
+    NUM_STAGES = 4
 
     STAGE_NAMES: tuple[str, ...] = (
         "Swing",
         "PreLanding",
         "Landing",
         "Stance",
-        "PushOff",
     )
 
     def __init__(self, cfg):
@@ -75,23 +72,9 @@ class ContactStageFilter(SensorBase):
         stage_name = self.stage_id_to_name(stage_id)
 
         eligibility = self._data.stage_eligibility[env_id, foot_id].detach().cpu().tolist()
-        quality = self._data.stage_quality[env_id, foot_id].detach().cpu().tolist()
-        scores = self._data.stage_scores[env_id, foot_id].detach().cpu().tolist()
-        belief = self._data.stage_belief[env_id, foot_id].detach().cpu().tolist()
-        confidence = float(self._data.stage_confidence[env_id, foot_id].item())
 
         contact_active = bool(self._data.contact_active[env_id, foot_id].item())
         landing_window = int(self._data.landing_window[env_id, foot_id].item())
-        land_trigger = bool(self._data.land_trigger[env_id, foot_id].item())
-        land_maintain = bool(self._data.land_maintain[env_id, foot_id].item())
-        land_active = bool(self._data.land_active[env_id, foot_id].item())
-        stance_landing_scale = float(self._data.stance_during_landing_scale[env_id, foot_id].item())
-        if land_trigger:
-            land_mode = "trigger"
-        elif land_maintain:
-            land_mode = "maintain"
-        else:
-            land_mode = "none"
         tau_on = float(self._data.tau_on[env_id, foot_id].item())
         tau_off = float(self._data.tau_off[env_id, foot_id].item())
         tau_stage = float(self._data.tau_stage[env_id, foot_id].item())
@@ -108,15 +91,12 @@ class ContactStageFilter(SensorBase):
         pre_core = bool(self._debug_pre_core[env_id, foot_id].item())
 
         return (
-            f"ContactStage(env={env_id}, foot={foot_id}, stage={stage_name}, conf={confidence:.3f}, "
+            f"ContactStage(env={env_id}, foot={foot_id}, stage={stage_name}, "
             f"contact_active={contact_active}, landing_window={landing_window}, tau_on={tau_on:.3f}, "
             f"tau_off={tau_off:.3f}, tau_stage={tau_stage:.3f}, h_eff={h_eff:.3f}, vz={vz:.3f}, "
             f"F={force:.3f}, Ff={force_filt:.3f}, A={area:.3f}, Af={area_filt:.3f}, "
             f"dF={d_force:.3f}, dA={d_area:.3f}, rho_fore={rho_fore:.3f}, pre_core={pre_core}, "
-            f"E_land_trigger={land_trigger}, E_land_maintain={land_maintain}, E_land={land_active}, "
-            f"landing_mode={land_mode}, stance_during_landing_scale={stance_landing_scale:.3f}, "
-            f"E={[round(v, 3) for v in eligibility]}, Q={[round(v, 3) for v in quality]}, "
-            f"scores={[round(v, 4) for v in scores]}, belief={[round(v, 4) for v in belief]})"
+            f"E={[round(v, 3) for v in eligibility]})"
         )
 
     def find_bodies(self, name_keys: Union[str, Sequence[str]], preserve_order: bool = False) -> tuple[list[int], list[str]]:
@@ -174,18 +154,8 @@ class ContactStageFilter(SensorBase):
         self._data.tau_on[env_ids_t] = 0.0
         self._data.tau_off[env_ids_t] = 0.0
         self._data.tau_stage[env_ids_t] = 0.0
-        self._data.land_trigger[env_ids_t] = False
-        self._data.land_maintain[env_ids_t] = False
-        self._data.land_active[env_ids_t] = False
-        self._data.stance_during_landing_scale[env_ids_t] = 1.0
 
         self._data.stage_eligibility[env_ids_t] = 0.0
-        self._data.stage_quality[env_ids_t] = 0.0
-        self._data.stage_scores[env_ids_t] = 0.0
-        self._data.stage_likelihood[env_ids_t] = 1.0 / float(self.NUM_STAGES)
-        self._data.stage_prior[env_ids_t] = 1.0 / float(self.NUM_STAGES)
-        self._data.stage_belief[env_ids_t] = 1.0 / float(self.NUM_STAGES)
-        self._data.stage_confidence[env_ids_t] = 0.0
         self._data.dominant_stage_id[env_ids_t] = self.STAGE_SWING
 
         self._filter_initialized[env_ids_t] = False
@@ -258,45 +228,6 @@ class ContactStageFilter(SensorBase):
         self._cop_ap_scale = torch.ones((self._num_bodies,), device=self.device, dtype=torch.float32)
         self._geometry_ready = False
 
-        self._predecessor_index = torch.tensor(
-            [self.STAGE_PUSHOFF, self.STAGE_SWING, self.STAGE_PRELANDING, self.STAGE_LANDING, self.STAGE_STANCE],
-            device=self.device,
-            dtype=torch.long,
-        )
-        self._lambda_self = torch.tensor(
-            [
-                self.cfg.lambda_self_sw,
-                self.cfg.lambda_self_pre,
-                self.cfg.lambda_self_land,
-                self.cfg.lambda_self_st,
-                self.cfg.lambda_self_push,
-            ],
-            device=self.device,
-            dtype=torch.float32,
-        )
-        self._lambda_prev = torch.tensor(
-            [
-                self.cfg.lambda_prev_sw,
-                self.cfg.lambda_prev_pre,
-                self.cfg.lambda_prev_land,
-                self.cfg.lambda_prev_st,
-                self.cfg.lambda_prev_push,
-            ],
-            device=self.device,
-            dtype=torch.float32,
-        )
-        self._min_stage_duration = torch.tensor(
-            [
-                self.cfg.min_stage_duration_sw,
-                self.cfg.min_stage_duration_pre,
-                self.cfg.min_stage_duration_land,
-                self.cfg.min_stage_duration_st,
-                self.cfg.min_stage_duration_push,
-            ],
-            device=self.device,
-            dtype=torch.float32,
-        )
-
     def _update_buffers_impl(self, env_ids: Union[Sequence[int], slice]):
         if not isinstance(env_ids, slice) and len(env_ids) == self._num_envs:
             env_ids = slice(None)
@@ -307,7 +238,7 @@ class ContactStageFilter(SensorBase):
         self._refresh_h_eff(env_ids)
         self._refresh_tactile_statistics(env_ids)
         self._refresh_contact_events(env_ids)
-        self._refresh_stage_belief(env_ids)
+        self._refresh_stage_state(env_ids)
         self._run_self_checks(env_ids)
 
     def _refresh_body_kinematics(self, env_ids: Union[Sequence[int], slice]) -> None:
@@ -499,128 +430,29 @@ class ContactStageFilter(SensorBase):
         self._contact_on_counter[env_ids] = on_counter
         self._contact_off_counter[env_ids] = off_counter
 
-    def _refresh_stage_belief(self, env_ids: Union[Sequence[int], slice]) -> None:
-        force = self._data.total_force[env_ids]
-        d_force = self._data.dF[env_ids]
-        area = self._data.contact_area[env_ids]
-        d_area = self._data.dA[env_ids]
+    def _refresh_stage_state(self, env_ids: Union[Sequence[int], slice]) -> None:
         h_eff = self._data.h_eff[env_ids]
         foot_vz = self._data.foot_vz[env_ids]
-        rho_fore = self._data.rho_fore[env_ids]
         contact_active = self._data.contact_active[env_ids]
         contact_on_event = self._data.contact_on_event[env_ids]
         landing_window = self._data.landing_window[env_ids]
 
-        pre_core = (
-            (force < float(self.cfg.F_pre))
-            & (area < float(self.cfg.A_pre))
-            & (~contact_active)
-            & (h_eff < float(self.cfg.h_pre))
-            & (foot_vz < -float(self.cfg.v_pre))
-        )
-        swing_base = (force < float(self.cfg.F_sw)) & (area < float(self.cfg.A_sw)) & (~contact_active)
-        if self.cfg.swing_prelanding_yield_mode == "hard":
-            E_sw = swing_base & (~pre_core)
-            swing_soft_scale = torch.ones_like(force)
-        else:
-            E_sw = swing_base
-            soft_scale = float(self.cfg.swing_prelanding_soft_scale)
-            swing_soft_scale = torch.where(pre_core, torch.full_like(force, soft_scale), torch.ones_like(force))
-        E_pre = pre_core
+        # Complete hard partition in 4 stages:
+        # - no contact: Swing / PreLanding
+        # - in contact: Landing / Stance
+        C = contact_active
+        W = contact_on_event | (landing_window > 0)
+        N = h_eff < float(self.cfg.h_zone)
+        D = foot_vz < -float(self.cfg.v_pre)
 
-        # Landing now uses trigger + maintain:
-        # - trigger keeps the strong impact semantics (F/A/dF/h + contact-on or active landing window gate).
-        # - maintain keeps landing alive for a short window with softer F/A thresholds.
-        E_land_trigger = (
-            (force > float(self.cfg.F_land))
-            & (area > float(self.cfg.A_land))
-            & (d_force > float(self.cfg.dF_land))
-            & (contact_on_event | (landing_window > 0))
-            & (h_eff < float(self.cfg.h_land))
-        )
-        landing_trigger_start = E_land_trigger & (landing_window <= 0)
-        landing_window = torch.where(
-            landing_trigger_start,
-            torch.full_like(landing_window, int(self.cfg.landing_window_frames)),
-            landing_window,
-        )
-        self._data.landing_window[env_ids] = landing_window
+        E_pre = (~C) & N & D
+        E_sw = (~C) & (~E_pre)
+        E_land = C & W
+        E_st = C & (~E_land)
 
-        E_land_maintain = (
-            (landing_window > 0)
-            & contact_active
-            & (force > float(self.cfg.F_land_maintain))
-            & (area > float(self.cfg.A_land_maintain))
-            & (h_eff < float(self.cfg.h_land))
-        )
-        E_land = E_land_trigger | E_land_maintain
-        E_st = (
-            (force > float(self.cfg.F_st))
-            & (area > float(self.cfg.A_st))
-            & contact_active
-            & (h_eff < float(self.cfg.h_st))
-        )
-        E_push = (
-            (force > float(self.cfg.F_push))
-            & (area > float(self.cfg.A_push))
-            & contact_active
-            & (h_eff < float(self.cfg.h_push))
-            & (d_force < -float(self.cfg.dF_push))
-            & (d_area < -float(self.cfg.dA_push))
-        )
-
-        Q_sw = self._H(h_eff, self.cfg.h_sw, self.cfg.s_h) * swing_soft_scale
-        Q_pre = torch.ones_like(force)
-        Q_land = self._H(d_force, self.cfg.dF_land, self.cfg.s_dF)
-        Q_st = (
-            self._H(force, self.cfg.F_st, self.cfg.s_F)
-            + self._H(area, self.cfg.A_st, self.cfg.s_A)
-            + self._L(torch.abs(d_force), self.cfg.dF_st, self.cfg.s_dF)
-        ) / 3.0
-        landing_window_active = landing_window > 0
-        stance_landing_scale = torch.where(
-            landing_window_active,
-            torch.full_like(force, float(self.cfg.stance_during_landing_scale)),
-            torch.ones_like(force),
-        )
-        Q_st = Q_st * stance_landing_scale
-        # Strengthen rho_fore dependency without adding hard gate:
-        # low forefoot ratio gets suppressed more aggressively.
-        Q_push_base = self._H(rho_fore, self.cfg.rho_fore0, self.cfg.s_rho)
-        Q_push = Q_push_base * Q_push_base
-
-        E_float = torch.stack((E_sw, E_pre, E_land, E_st, E_push), dim=-1).to(dtype=force.dtype)
-        Q = torch.stack((Q_sw, Q_pre, Q_land, Q_st, Q_push), dim=-1)
-
-        Q = torch.nan_to_num(Q, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
-        stage_scores = E_float * Q
-        stage_scores = torch.nan_to_num(stage_scores, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-
-        belief_prev = self._data.stage_belief[env_ids]
-        stage_prior = self._build_stage_prior(belief_prev)
-
-        likelihood_from_score = torch.softmax(float(self.cfg.beta_score) * stage_scores, dim=-1)
-        likelihood_from_score = torch.nan_to_num(
-            likelihood_from_score,
-            nan=1.0 / float(self.NUM_STAGES),
-            posinf=0.0,
-            neginf=0.0,
-        )
-        likelihood_from_score = self._normalize_prob(likelihood_from_score)
-
-        has_stage_signal = (stage_scores > 0.0).any(dim=-1, keepdim=True)
-        stage_likelihood = torch.where(has_stage_signal, likelihood_from_score, stage_prior)
-        stage_likelihood = self._normalize_prob(stage_likelihood)
-
-        belief_raw = self._normalize_prob(stage_likelihood * stage_prior)
-        if self.cfg.enable_min_stage_duration:
-            belief_raw = self._apply_min_stage_duration(env_ids, belief_raw)
-
-        ema_stage = float(min(max(self.cfg.ema_stage, 0.0), 1.0))
-        belief = (1.0 - ema_stage) * belief_prev + ema_stage * belief_raw
-        belief = self._normalize_prob(belief)
-
-        dominant_stage_new = torch.argmax(belief, dim=-1)
+        stage_mask = torch.stack((E_sw, E_pre, E_land, E_st), dim=-1)
+        stage_eligibility = stage_mask.to(dtype=h_eff.dtype)
+        dominant_stage_new = torch.argmax(stage_mask.to(dtype=torch.int64), dim=-1)
         dominant_stage_prev = self._data.dominant_stage_id[env_ids]
 
         dt = self._effective_dt()
@@ -631,50 +463,10 @@ class ContactStageFilter(SensorBase):
             torch.zeros_like(tau_stage_prev),
         )
 
-        entropy = -(belief * torch.log(belief.clamp_min(float(self.cfg.eps)))).sum(dim=-1)
-        max_entropy = torch.log(torch.tensor(float(self.NUM_STAGES), device=belief.device, dtype=belief.dtype))
-        confidence = 1.0 - entropy / max_entropy
-        confidence = torch.nan_to_num(confidence, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-
-        self._data.stage_eligibility[env_ids] = E_float
-        self._data.stage_quality[env_ids] = Q
-        self._data.stage_scores[env_ids] = stage_scores
-        self._data.stage_likelihood[env_ids] = stage_likelihood
-        self._data.stage_prior[env_ids] = stage_prior
-        self._data.stage_belief[env_ids] = belief
-        self._data.stage_confidence[env_ids] = confidence
+        self._data.stage_eligibility[env_ids] = stage_eligibility
         self._data.dominant_stage_id[env_ids] = dominant_stage_new
         self._data.tau_stage[env_ids] = tau_stage
-        self._data.land_trigger[env_ids] = E_land_trigger
-        self._data.land_maintain[env_ids] = E_land_maintain
-        self._data.land_active[env_ids] = E_land
-        self._data.stance_during_landing_scale[env_ids] = stance_landing_scale
-        self._debug_pre_core[env_ids] = pre_core
-
-    def _build_stage_prior(self, belief_prev: torch.Tensor) -> torch.Tensor:
-        predecessor_belief = belief_prev[..., self._predecessor_index]
-        prior_score = float(self.cfg.eps_prior)
-        prior_score = prior_score + self._lambda_self.view(1, 1, -1) * belief_prev
-        prior_score = prior_score + self._lambda_prev.view(1, 1, -1) * predecessor_belief
-        prior_score = torch.nan_to_num(prior_score, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        return self._normalize_prob(prior_score)
-
-    def _apply_min_stage_duration(self, env_ids: Union[Sequence[int], slice], belief_raw: torch.Tensor) -> torch.Tensor:
-        dominant_prev = self._data.dominant_stage_id[env_ids]
-        tau_stage = self._data.tau_stage[env_ids]
-
-        min_duration = self._min_stage_duration[dominant_prev]
-        valid_duration = min_duration > 0.0
-        if not torch.any(valid_duration):
-            return belief_raw
-
-        dwell_ratio = ((min_duration - tau_stage) / min_duration.clamp_min(float(self.cfg.eps))).clamp(0.0, 1.0)
-        stay_weight = (float(self.cfg.lambda_dwell) * dwell_ratio).clamp(0.0, 1.0)
-        stay_weight = torch.where(valid_duration, stay_weight, torch.zeros_like(stay_weight))
-
-        prev_one_hot = torch_f.one_hot(dominant_prev, num_classes=self.NUM_STAGES).to(dtype=belief_raw.dtype)
-        belief_dwell = (1.0 - stay_weight.unsqueeze(-1)) * belief_raw + stay_weight.unsqueeze(-1) * prev_one_hot
-        return self._normalize_prob(belief_dwell)
+        self._debug_pre_core[env_ids] = E_pre
 
     def _run_self_checks(self, env_ids: Union[Sequence[int], slice]) -> None:
         if not self.cfg.enable_self_check:
@@ -684,19 +476,14 @@ class ContactStageFilter(SensorBase):
         area_filt = self._data.contact_area_filt[env_ids]
         d_force = self._data.dF[env_ids]
         d_area = self._data.dA[env_ids]
-        scores = self._data.stage_scores[env_ids]
-        likelihood = self._data.stage_likelihood[env_ids]
-        prior = self._data.stage_prior[env_ids]
-        belief = self._data.stage_belief[env_ids]
-        confidence = self._data.stage_confidence[env_ids]
+        h_eff = self._data.h_eff[env_ids]
+        foot_vz = self._data.foot_vz[env_ids]
+        contact_active = self._data.contact_active[env_ids]
+        eligibility = self._data.stage_eligibility[env_ids]
         dominant = self._data.dominant_stage_id[env_ids]
         on_event = self._data.contact_on_event[env_ids]
         off_event = self._data.contact_off_event[env_ids]
         landing_window = self._data.landing_window[env_ids]
-        land_trigger = self._data.land_trigger[env_ids]
-        land_maintain = self._data.land_maintain[env_ids]
-        land_active = self._data.land_active[env_ids]
-        stance_landing_scale = self._data.stance_during_landing_scale[env_ids]
         tau_on = self._data.tau_on[env_ids]
         tau_off = self._data.tau_off[env_ids]
         tau_stage = self._data.tau_stage[env_ids]
@@ -706,19 +493,37 @@ class ContactStageFilter(SensorBase):
         if not torch.isfinite(d_force).all() or not torch.isfinite(d_area).all():
             raise RuntimeError("ContactStageFilter dF/dA contains NaN/inf")
 
-        if not torch.isfinite(scores).all() or not torch.isfinite(likelihood).all() or not torch.isfinite(prior).all() or not torch.isfinite(belief).all():
-            raise RuntimeError("ContactStageFilter has NaN/inf in score/probability tensors")
+        if eligibility.shape[-1] != self.NUM_STAGES:
+            raise RuntimeError("ContactStageFilter stage tensor shape mismatch with NUM_STAGES")
 
-        belief_sum_error = torch.abs(belief.sum(dim=-1) - 1.0)
-        if torch.any(belief_sum_error > float(self.cfg.self_check_tol)):
-            raise RuntimeError("ContactStageFilter belief rows are not normalized")
+        eligibility_bool = eligibility > 0.5
+        eligible_count = eligibility_bool.to(dtype=torch.int64).sum(dim=-1)
+        if torch.any(eligible_count == 0):
+            raise RuntimeError("ContactStageFilter stage partition contains all-zero rows")
+        if torch.any(eligible_count > 1):
+            raise RuntimeError("ContactStageFilter stage partition contains overlapping stages")
+        if torch.any(eligible_count != 1):
+            raise RuntimeError("ContactStageFilter stage partition is not one-hot")
 
-        if torch.any(confidence < -1e-6) or torch.any(confidence > 1.0 + 1e-6):
-            raise RuntimeError("ContactStageFilter confidence out of [0, 1]")
+        E_sw = eligibility_bool[..., self.STAGE_SWING]
+        E_pre = eligibility_bool[..., self.STAGE_PRELANDING]
+        E_land = eligibility_bool[..., self.STAGE_LANDING]
+        E_st = eligibility_bool[..., self.STAGE_STANCE]
 
-        dominant_check = torch.argmax(belief, dim=-1)
-        if not torch.equal(dominant, dominant_check):
-            raise RuntimeError("ContactStageFilter dominant_stage_id mismatch with argmax(belief)")
+        expected_pre = (~contact_active) & (h_eff < float(self.cfg.h_zone)) & (foot_vz < -float(self.cfg.v_pre))
+        expected_land = contact_active & (on_event | (landing_window > 0))
+        if torch.any(E_pre != expected_pre):
+            raise RuntimeError("ContactStageFilter PreLanding hard partition mismatch")
+        if torch.any(E_land != expected_land):
+            raise RuntimeError("ContactStageFilter Landing hard partition mismatch")
+        if torch.any((~contact_active) != (E_sw | E_pre)):
+            raise RuntimeError("ContactStageFilter no-contact branch is not partitioned by Swing/PreLanding")
+        if torch.any(contact_active != (E_land | E_st)):
+            raise RuntimeError("ContactStageFilter contact branch is not partitioned by Landing/Stance")
+
+        dominant_from_mask = torch.argmax(eligibility_bool.to(dtype=torch.int64), dim=-1)
+        if not torch.equal(dominant, dominant_from_mask):
+            raise RuntimeError("ContactStageFilter dominant_stage_id must match hard partition")
 
         if torch.any(on_event & off_event):
             raise RuntimeError("ContactStageFilter has simultaneous contact_on_event and contact_off_event")
@@ -729,12 +534,6 @@ class ContactStageFilter(SensorBase):
             raise RuntimeError("ContactStageFilter landing_window must be non-negative")
         if torch.any(landing_window > int(self.cfg.landing_window_frames)):
             raise RuntimeError("ContactStageFilter landing_window exceeded configured maximum")
-        if torch.any(land_active != (land_trigger | land_maintain)):
-            raise RuntimeError("ContactStageFilter land_active mismatch with trigger/maintain states")
-        if not torch.isfinite(stance_landing_scale).all():
-            raise RuntimeError("ContactStageFilter stance_during_landing_scale contains NaN/inf")
-        if torch.any(stance_landing_scale <= 0.0):
-            raise RuntimeError("ContactStageFilter stance_during_landing_scale must stay positive")
 
         if torch.any(tau_on < 0.0) or torch.any(tau_off < 0.0) or torch.any(tau_stage < 0.0):
             raise RuntimeError("ContactStageFilter tau values must be non-negative")
@@ -767,27 +566,6 @@ class ContactStageFilter(SensorBase):
         if self.cfg.update_period > 0.0:
             return float(self.cfg.update_period)
         return float(self._sim_physics_dt)
-
-    def _normalize_prob(self, tensor: torch.Tensor) -> torch.Tensor:
-        tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        denom = tensor.sum(dim=-1, keepdim=True)
-        fallback = torch.full_like(tensor, 1.0 / float(self.NUM_STAGES))
-        normalized = torch.where(denom > float(self.cfg.eps), tensor / denom, fallback)
-        normalized = torch.nan_to_num(normalized, nan=1.0 / float(self.NUM_STAGES), posinf=0.0, neginf=0.0)
-        return normalized.clamp_min(0.0)
-
-    @staticmethod
-    def _H(x: torch.Tensor, x0: float, s: float) -> torch.Tensor:
-        return torch.sigmoid((x - float(x0)) / max(float(s), 1e-6))
-
-    @staticmethod
-    def _L(x: torch.Tensor, x0: float, s: float) -> torch.Tensor:
-        return 1.0 - ContactStageFilter._H(x, x0, s)
-
-    @staticmethod
-    def _M(x: torch.Tensor, mu: float, s: float) -> torch.Tensor:
-        sigma = max(float(s), 1e-6)
-        return torch.exp(-0.5 * ((x - float(mu)) / sigma) ** 2)
 
     def _resolve_env_ids_tensor(self, env_ids: Union[Sequence[int], slice, torch.Tensor, None]) -> torch.Tensor:
         if env_ids is None:

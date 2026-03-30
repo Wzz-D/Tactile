@@ -21,7 +21,7 @@ import cli_args  # isort: skip
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Play an RL agent with Instinct-RL.")
 parser.add_argument("--video", action="store_true", default=True, help="Record videos during training.")
-parser.add_argument("--video_length", type=int, default=10000, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_length", type=int, default=1000, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_start_step", type=int, default=0, help="Start step for the simulation.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
@@ -46,6 +46,9 @@ parser.add_argument("--foot_metrics", action="store_true", default=False, help="
 parser.add_argument("--foot_metrics_window", type=int, default=200, help="Window size (steps) for average CoP/Delta-CoP/ContactArea.")
 parser.add_argument("--foot_metrics_print_every", type=int, default=1, help="Print foot metrics every N steps.")
 parser.add_argument("--foot_metrics_env_id", type=int, default=0, help="Environment index used for foot metrics.")
+parser.add_argument("--h_eff_debug", action="store_true", default=False, help="Print per-step left/right foot h_eff from contact_stage_filter.")
+parser.add_argument("--h_eff_print_every", type=int, default=1, help="Print h_eff every N steps.")
+parser.add_argument("--h_eff_env_id", type=int, default=0, help="Environment index used for h_eff debug output.")
 parser.add_argument("--eval_mode", action="store_true", default=False, help="Evaluate first episode of each env and dump stage-wise metrics.")
 parser.add_argument("--eval_max_steps", type=int, default=20000, help="Maximum simulation steps in eval mode before forced stop.")
 parser.add_argument("--eval_progress_every", type=int, default=200, help="Print eval progress every N steps.")
@@ -135,10 +138,12 @@ def _find_stage_reward_debug_term(env) -> object | None:
         "stage_landing_f_v1",
         "stage_landing_df_v1",
         "stage_landing_rho_v1",
+        "stage_swing_clearance_v1",
         "stage_pre_v_v1",
         "stage_pre_a_v1",
         "stage_stance_cop_v1",
         "stage_stance_area_v1",
+        "stage_stance_delta_cop_v1",
     )
     for term_name in debug_term_candidates:
         try:
@@ -424,6 +429,15 @@ def main():
             )
         if "foot_tactile" not in env.unwrapped.scene.sensors:
             raise RuntimeError("--foot_metrics requires 'foot_tactile' sensor in the scene.")
+    if args_cli.h_eff_debug:
+        if args_cli.h_eff_print_every <= 0:
+            raise ValueError("--h_eff_print_every must be > 0.")
+        if args_cli.h_eff_env_id < 0 or args_cli.h_eff_env_id >= env.num_envs:
+            raise ValueError(
+                f"--h_eff_env_id must be in [0, {env.num_envs - 1}], got {args_cli.h_eff_env_id}."
+            )
+        if "contact_stage_filter" not in env.unwrapped.scene.sensors:
+            raise RuntimeError("--h_eff_debug requires 'contact_stage_filter' sensor in the scene.")
     if args_cli.eval_mode:
         if args_cli.eval_max_steps <= 0:
             raise ValueError("--eval_max_steps must be > 0.")
@@ -439,7 +453,7 @@ def main():
 
         eval_stage_sensor = env.unwrapped.scene.sensors["contact_stage_filter"]
         eval_num_feet = int(eval_stage_sensor.num_bodies)
-        eval_num_stages = int(getattr(eval_stage_sensor, "NUM_STAGES", 5))
+        eval_num_stages = int(getattr(eval_stage_sensor, "NUM_STAGES", 4))
         if hasattr(eval_stage_sensor, "stage_name_map"):
             eval_stage_name_map = {int(k): str(v) for k, v in eval_stage_sensor.stage_name_map().items()}
         else:
@@ -609,6 +623,25 @@ def main():
                     metric_sum_delta_cop_norm.zero_()
                     metric_sum_contact_area.zero_()
 
+            if args_cli.h_eff_debug and timestep % args_cli.h_eff_print_every == 0:
+                stage_sensor = env.unwrapped.scene.sensors["contact_stage_filter"]
+                env_id = args_cli.h_eff_env_id
+                h_eff = stage_sensor.data.h_eff[env_id].detach().cpu().to(dtype=torch.float64)
+                foot_names = list(stage_sensor.body_names)
+                if h_eff.numel() >= 2:
+                    left_name = foot_names[0] if len(foot_names) > 0 else "left_foot"
+                    right_name = foot_names[1] if len(foot_names) > 1 else "right_foot"
+                    print(
+                        f"[h_eff step={timestep} env={env_id}] "
+                        f"{left_name}={h_eff[0]:.4f}m {right_name}={h_eff[1]:.4f}m"
+                    )
+                else:
+                    values = " ".join(
+                        f"{foot_names[i] if i < len(foot_names) else f'foot_{i}'}={float(h_eff[i]):.4f}m"
+                        for i in range(h_eff.numel())
+                    )
+                    print(f"[h_eff step={timestep} env={env_id}] {values}")
+
             if args_cli.foot_debug_full:
                 print("--------------------------------Foot Debug--------------------------")
                 # print(env.unwrapped.scene.sensors.keys())
@@ -649,7 +682,6 @@ def main():
                 if "contact_stage_filter" in env.unwrapped.scene.sensors:
                     stage_sensor = env.unwrapped.scene.sensors["contact_stage_filter"]
                     print("contact_stage dominant_stage_id", stage_sensor.data.dominant_stage_id)
-                    print("contact_stage confidence", stage_sensor.data.stage_confidence)
                     for foot_id in range(stage_sensor.num_bodies):
                         print(stage_sensor.get_stage_debug_string(debug_env_id, foot_id))
                     if not stage_reward_debug_lookup_done:
@@ -660,14 +692,17 @@ def main():
                         foot_names = stage_sensor.body_names
                         for foot_id in range(stage_sensor.num_bodies):
                             foot_name = foot_names[foot_id] if foot_id < len(foot_names) else f"foot_{foot_id}"
+                            alpha_sw = float(stage_rew_dbg["alpha_sw"][foot_id].item())
                             alpha_pre = float(stage_rew_dbg["alpha_pre"][foot_id].item())
                             alpha_land = float(stage_rew_dbg["alpha_land"][foot_id].item())
                             alpha_st = float(stage_rew_dbg["alpha_st"][foot_id].item())
-                            alpha_push = float(stage_rew_dbg["alpha_push"][foot_id].item())
+                            r_sw_h = float(stage_rew_dbg["r_sw_h"][foot_id].item())
                             r_pre_v = float(stage_rew_dbg["r_pre_v"][foot_id].item())
                             r_pre_a = float(stage_rew_dbg["r_pre_a"][foot_id].item())
                             r_cop = float(stage_rew_dbg["r_cop"][foot_id].item())
                             r_area = float(stage_rew_dbg["r_area"][foot_id].item())
+                            r_st_delta_cop = float(stage_rew_dbg["r_st_delta_cop"][foot_id].item())
+                            delta_cop = float(stage_rew_dbg["delta_cop"][foot_id].item())
                             r_contact = float(stage_rew_dbg["r_contact"][foot_id].item())
                             contact_phase_weight = float(stage_rew_dbg["contact_phase_weight"][foot_id].item())
                             landing_event_penalty = float(stage_rew_dbg["landing_event_penalty"][foot_id].item())
@@ -680,19 +715,19 @@ def main():
                             landing_window = int(stage_rew_dbg["landing_window"][foot_id].item())
                             enable_land = float(stage_rew_dbg["enable_land"][foot_id].item())
                             enable_st = float(stage_rew_dbg["enable_st"][foot_id].item())
-                            enable_push = float(stage_rew_dbg["enable_push"][foot_id].item())
                             gamma_land = float(stage_rew_dbg["gamma_land"][foot_id].item())
                             gamma_st = float(stage_rew_dbg["gamma_st"][foot_id].item())
-                            gamma_push = float(stage_rew_dbg["gamma_push"][foot_id].item())
                             print(
                                 f"[StageRewardV1 env={debug_env_id} foot={foot_id}({foot_name})] "
-                                f"alpha_pre={alpha_pre:.4f} alpha_land={alpha_land:.4f} "
-                                f"alpha_st={alpha_st:.4f} alpha_push={alpha_push:.4f} "
-                                f"r_pre_v={r_pre_v:.4f} r_pre_a={r_pre_a:.4f} "
-                                f"r_cop={r_cop:.4f} r_area={r_area:.4f} r_contact={r_contact:.4f} "
+                                f"alpha_sw={alpha_sw:.4f} alpha_pre={alpha_pre:.4f} alpha_land={alpha_land:.4f} "
+                                f"alpha_st={alpha_st:.4f} "
+                                f"r_sw_h={r_sw_h:.4f} r_pre_v={r_pre_v:.4f} r_pre_a={r_pre_a:.4f} "
+                                f"r_cop={r_cop:.4f} r_area={r_area:.4f} "
+                                f"r_st_delta_cop={r_st_delta_cop:.4f} delta_cop={delta_cop:.4f} "
+                                f"r_contact={r_contact:.4f} "
                                 f"phase_w={contact_phase_weight:.4f} "
-                                f"enable=(L:{enable_land:.0f},S:{enable_st:.0f},P:{enable_push:.0f}) "
-                                f"gamma=(L:{gamma_land:.2f},S:{gamma_st:.2f},P:{gamma_push:.2f}) "
+                                f"enable=(L:{enable_land:.0f},S:{enable_st:.0f}) "
+                                f"gamma=(L:{gamma_land:.2f},S:{gamma_st:.2f}) "
                                 f"landing_event_penalty={landing_event_penalty:.4f} "
                                 f"vz={pre_vz:.4f} landing_window={landing_window} "
                                 f"F_peak={landing_f_peak:.4f} dF_peak={landing_df_peak:.4f} "
