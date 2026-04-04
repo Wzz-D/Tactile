@@ -172,14 +172,14 @@ def _print_foot_contact_obs_sample(obs: torch.Tensor, env, env_id: int = 0) -> N
     env_id = max(0, min(env_id, env.num_envs - 1))
     term_slice, term_shape = get_obs_slice(obs_segments, "foot_contact_state")
     term_flat = obs[env_id, term_slice].detach().cpu()
-    if term_flat.numel() % 8 != 0:
+    if term_flat.numel() % 5 != 0:
         print(
             f"[ObsDebug] unexpected 'foot_contact_state' flattened size={term_flat.numel()}, "
             f"shape_meta={term_shape}"
         )
         return
 
-    foot_tensor = term_flat.view(-1, 8)
+    foot_tensor = term_flat.view(-1, 5)
     foot_names = []
     if "contact_stage_filter" in env.unwrapped.scene.sensors:
         foot_names = list(env.unwrapped.scene.sensors["contact_stage_filter"].body_names)
@@ -192,11 +192,10 @@ def _print_foot_contact_obs_sample(obs: torch.Tensor, env, env_id: int = 0) -> N
     )
     for foot_id in range(foot_tensor.shape[0]):
         foot_name = foot_names[foot_id] if foot_id < len(foot_names) else f"foot_{foot_id}"
-        F, cop_x, cop_y, area, theta, vz, rho_peak, rho_fore = foot_tensor[foot_id].tolist()
+        area, f_over_bw, cop_x, cop_y, vz = foot_tensor[foot_id].tolist()
         print(
             f"[ObsDebug env={env_id} {foot_name}] "
-            f"F={F:.4f}, COP2D=({cop_x:.4f},{cop_y:.4f}), area={area:.4f}, "
-            f"theta={theta:.4f}, vz={vz:.4f}, rho_peak={rho_peak:.4f}, rho_fore={rho_fore:.4f}"
+            f"area={area:.4f}, F/BW={f_over_bw:.4f}, COPnorm=({cop_x:.4f},{cop_y:.4f}), vz_norm={vz:.4f}"
         )
 
 

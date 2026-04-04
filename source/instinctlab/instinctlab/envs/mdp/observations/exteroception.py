@@ -27,6 +27,149 @@ def foot_tactile(env, sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_tactile"
     return sensor.data.force_N                    # (N, 2, 120)
 
 
+_FOOT_CONTACT_STATE_DIM = 5
+_FOOT_CONTACT_STATE_BODY_WEIGHT_CACHE_ATTR = "_foot_contact_state_body_weight_n"
+_FOOT_CONTACT_STATE_COP_SCALE_CACHE_ATTR = "_foot_contact_state_cop_scales"
+_FOOT_CONTACT_STATE_BODY_WEIGHT_FALLBACK_N = 327.68
+_FOOT_CONTACT_STATE_VZ_REF = 0.24
+_FOOT_CONTACT_STATE_FORCE_GATE = 0.05
+
+
+def _get_or_cache_body_weight_n(env, asset_name: str = "robot") -> float:
+    """Read body weight from runtime masses once and cache it on the env."""
+    cached_value = getattr(env, _FOOT_CONTACT_STATE_BODY_WEIGHT_CACHE_ATTR, None)
+    if isinstance(cached_value, (float, int)) and np.isfinite(cached_value) and float(cached_value) > 1e-6:
+        return float(cached_value)
+
+    body_weight_n = float(_FOOT_CONTACT_STATE_BODY_WEIGHT_FALLBACK_N)
+    try:
+        asset = env.scene[asset_name]
+        masses = asset.root_physx_view.get_masses()
+        masses_t = torch.as_tensor(masses, device=env.device, dtype=torch.float32)
+        total_mass = masses_t[0].sum() if masses_t.ndim >= 2 else masses_t.sum()
+        total_mass = torch.nan_to_num(total_mass, nan=0.0, posinf=0.0, neginf=0.0)
+        total_mass_scalar = float(total_mass.item())
+        if total_mass_scalar > 1e-6:
+            body_weight_n = total_mass_scalar * 9.81
+    except Exception:
+        body_weight_n = float(_FOOT_CONTACT_STATE_BODY_WEIGHT_FALLBACK_N)
+
+    body_weight_n = max(float(body_weight_n), 1e-6)
+    setattr(env, _FOOT_CONTACT_STATE_BODY_WEIGHT_CACHE_ATTR, body_weight_n)
+    return body_weight_n
+
+
+def _outline_piecewise_scales(outline_xy: list[list[float]] | tuple[tuple[float, float], ...]) -> tuple[float, float, float, float]:
+    points = np.asarray(outline_xy, dtype=np.float32)
+    if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] != 2:
+        return (1.0, 1.0, 1.0, 1.0)
+
+    x_vals = points[:, 0]
+    y_vals = points[:, 1]
+    x_neg = max(abs(float(np.min(x_vals))), 1e-6)
+    x_pos = max(float(np.max(x_vals)), 1e-6)
+    y_neg = max(abs(float(np.min(y_vals))), 1e-6)
+    y_pos = max(float(np.max(y_vals)), 1e-6)
+    return (x_neg, x_pos, y_neg, y_pos)
+
+
+def _get_or_cache_cop_normalization_scales(env, tactile_sensor) -> torch.Tensor:
+    """Build and cache per-foot COP piecewise normalization scales from foot outlines."""
+    num_bodies = int(getattr(tactile_sensor, "num_bodies", 0))
+    body_names = tuple(getattr(tactile_sensor, "body_names", []))
+    cache = getattr(env, _FOOT_CONTACT_STATE_COP_SCALE_CACHE_ATTR, None)
+    if isinstance(cache, dict):
+        cached_scales = cache.get("scales")
+        if (
+            cache.get("num_bodies") == num_bodies
+            and cache.get("body_names") == body_names
+            and isinstance(cached_scales, torch.Tensor)
+            and cached_scales.shape == (num_bodies, 4)
+            and str(cached_scales.device) == str(env.device)
+        ):
+            return cached_scales
+
+    from instinctlab.tasks.parkour.config.g1.foot_tactile_geometry import (
+        LEFT_FOOT_OUTLINE_XY_ANKLE_ROLL,
+        RIGHT_FOOT_OUTLINE_XY_ANKLE_ROLL,
+    )
+
+    left_scales = _outline_piecewise_scales(LEFT_FOOT_OUTLINE_XY_ANKLE_ROLL)
+    right_scales = _outline_piecewise_scales(RIGHT_FOOT_OUTLINE_XY_ANKLE_ROLL)
+    default_scales = tuple(0.5 * (left + right) for left, right in zip(left_scales, right_scales))
+
+    scales = torch.empty((max(num_bodies, 0), 4), device=env.device, dtype=torch.float32)
+    for body_id in range(num_bodies):
+        body_name = body_names[body_id] if body_id < len(body_names) else ""
+        body_name_l = body_name.lower()
+        if "right" in body_name_l or body_name_l.startswith("r_"):
+            x_neg, x_pos, y_neg, y_pos = right_scales
+        elif "left" in body_name_l or body_name_l.startswith("l_"):
+            x_neg, x_pos, y_neg, y_pos = left_scales
+        elif body_id == 0:
+            x_neg, x_pos, y_neg, y_pos = left_scales
+        elif body_id == 1:
+            x_neg, x_pos, y_neg, y_pos = right_scales
+        else:
+            x_neg, x_pos, y_neg, y_pos = default_scales
+
+        scales[body_id, 0] = x_neg
+        scales[body_id, 1] = x_pos
+        scales[body_id, 2] = y_neg
+        scales[body_id, 3] = y_pos
+
+    setattr(
+        env,
+        _FOOT_CONTACT_STATE_COP_SCALE_CACHE_ATTR,
+        {
+            "num_bodies": num_bodies,
+            "body_names": body_names,
+            "scales": scales,
+        },
+    )
+    return scales
+
+
+def _piecewise_normalize_cop(
+    cop_2d: torch.Tensor,
+    tactile_ids: list[int],
+    cop_scales: torch.Tensor,
+    force_norm: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Piecewise COP normalization using left/right outline extents in ankle-roll frame."""
+    if cop_2d.numel() == 0:
+        return torch.zeros_like(cop_2d)
+
+    if cop_scales.numel() == 0:
+        cop_norm = torch.zeros_like(cop_2d)
+    else:
+        ids_t = torch.as_tensor(tactile_ids, device=cop_2d.device, dtype=torch.long)
+        ids_t = ids_t.clamp_(0, cop_scales.shape[0] - 1)
+        selected_scales = cop_scales.index_select(0, ids_t)
+
+        x_neg = selected_scales[:, 0].view(1, -1).clamp_min(1e-6)
+        x_pos = selected_scales[:, 1].view(1, -1).clamp_min(1e-6)
+        y_neg = selected_scales[:, 2].view(1, -1).clamp_min(1e-6)
+        y_pos = selected_scales[:, 3].view(1, -1).clamp_min(1e-6)
+
+        cop_x = torch.nan_to_num(cop_2d[..., 0], nan=0.0, posinf=0.0, neginf=0.0)
+        cop_y = torch.nan_to_num(cop_2d[..., 1], nan=0.0, posinf=0.0, neginf=0.0)
+        cop_x_norm = torch.where(cop_x >= 0.0, cop_x / x_pos, cop_x / x_neg)
+        cop_y_norm = torch.where(cop_y >= 0.0, cop_y / y_pos, cop_y / y_neg)
+        cop_x_norm = torch.clamp(cop_x_norm, -1.0, 1.0)
+        cop_y_norm = torch.clamp(cop_y_norm, -1.0, 1.0)
+
+        # When contact is very weak, COP is unreliable and should not pollute the policy.
+        if force_norm is not None:
+            stable_contact = force_norm >= float(_FOOT_CONTACT_STATE_FORCE_GATE)
+            cop_x_norm = torch.where(stable_contact, cop_x_norm, torch.zeros_like(cop_x_norm))
+            cop_y_norm = torch.where(stable_contact, cop_y_norm, torch.zeros_like(cop_y_norm))
+
+        cop_norm = torch.stack((cop_x_norm, cop_y_norm), dim=-1)
+
+    return torch.nan_to_num(cop_norm, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _resolve_stage_to_tactile_ids(stage_sensor, tactile_sensor, num_feet: int) -> list[int]:
     stage_names = list(getattr(stage_sensor, "body_names", []))
     tactile_names = list(getattr(tactile_sensor, "body_names", []))
@@ -57,8 +200,8 @@ def foot_contact_state(
 ) -> torch.Tensor:
     """Per-foot low-dimensional contact state for actor/critic observations.
 
-    Per-foot feature order (8 dims):
-    [F, cop_x, cop_y, contact_area_ratio, theta, vz, rho_peak, rho_fore]
+    Per-foot feature order (5 dims):
+    [contact_area_ratio, F_over_body_weight, cop_x_norm, cop_y_norm, vz_norm]
     """
     stage_sensor = None
     tactile_sensor = None
@@ -79,7 +222,7 @@ def foot_contact_state(
         num_feet = int(getattr(tactile_sensor, "num_bodies", num_feet))
 
     if stage_sensor is None or tactile_sensor is None or num_envs <= 0 or num_feet <= 0:
-        return torch.zeros((max(num_envs, 0), max(num_feet, 0), 8), device=env.device, dtype=torch.float32)
+        return torch.zeros((max(num_envs, 0), max(num_feet, 0), _FOOT_CONTACT_STATE_DIM), device=env.device, dtype=torch.float32)
 
     stage_data = stage_sensor.data
     tactile_data = tactile_sensor.data
@@ -103,40 +246,29 @@ def foot_contact_state(
         posinf=0.0,
         neginf=0.0,
     ).clamp(0.0, 1.0)
-    theta = torch.nan_to_num(
-        stage_data.foot_theta[:, :num_feet],
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
     vz = torch.nan_to_num(
         stage_data.foot_vz[:, :num_feet],
         nan=0.0,
         posinf=0.0,
         neginf=0.0,
     )
-    rho_peak = torch.nan_to_num(
-        stage_data.rho_peak[:, :num_feet],
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    ).clamp_min(0.0)
-    rho_fore = torch.nan_to_num(
-        stage_data.rho_fore[:, :num_feet],
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    ).clamp(0.0, 1.0)
 
-    obs = torch.cat(
+    # Force normalization by body weight keeps force channels comparable to bounded features.
+    body_weight_n = _get_or_cache_body_weight_n(env, asset_name="robot")
+    force_over_bw = torch.clamp(total_force / max(body_weight_n, 1e-6), min=0.0, max=1.5)
+
+    # COP normalization uses asymmetric left/right outline extents (heel/toe and medial/lateral).
+    cop_scales = _get_or_cache_cop_normalization_scales(env, tactile_sensor)
+    cop_norm = _piecewise_normalize_cop(cop_2d, tactile_ids=tactile_ids, cop_scales=cop_scales, force_norm=force_over_bw)
+
+    vz_norm = torch.clamp(vz / float(_FOOT_CONTACT_STATE_VZ_REF), min=-1.5, max=1.5)
+    obs = torch.stack(
         (
-            total_force.unsqueeze(-1),
-            cop_2d,
-            contact_area_ratio.unsqueeze(-1),
-            theta.unsqueeze(-1),
-            vz.unsqueeze(-1),
-            rho_peak.unsqueeze(-1),
-            rho_fore.unsqueeze(-1),
+            contact_area_ratio,
+            force_over_bw,
+            cop_norm[..., 0],
+            cop_norm[..., 1],
+            vz_norm,
         ),
         dim=-1,
     )

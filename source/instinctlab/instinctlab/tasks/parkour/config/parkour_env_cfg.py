@@ -47,30 +47,39 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
     "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
     "asset_cfg": SceneEntityCfg("robot"),
-    "enable_swing_clearance_reward": True,
-    "w_swing_h": 0.10,
+    # Safety defaults: disable all optional sub-rewards in common params.
+    # Each decomposed term must explicitly enable only its own component.
+    "enable_swing_clearance_reward": False,
+    "w_swing_h": 0.0,
     "swing_h_ref": 0.12,
     "swing_command_name": "base_velocity",
     "swing_vel_threshold": 0.15,
+    "enable_prelanding_reward": False,
     "pre_vz_ref": 0.24,
     "pre_az_ref": 6.00,
     "pre_az_filter_alpha": 0.70,
+    "w_pre_v": 0.0,
+    "w_pre_a": 0.0,
+    "enable_landing_event_penalty": False,
+    "w_land_F": 0.0,
+    "w_land_dF": 0.0,
+    "w_land_rho": 0.0,
     "land_dF_ref": 70000.0,
     "body_weight": 350.0,
     "cop_margin_max": 0.038,
     "contact_quality_eps": 1e-6,
-    "enable_contact_quality_reward": True,
-    "w_cop": 0.24,
-    "w_area": 0.18,
-    "enable_stance_delta_cop_reward": True,
+    "enable_contact_quality_reward": False,
+    "w_cop": 0.0,
+    "w_area": 0.0,
+    "enable_stance_delta_cop_reward": False,
     "w_st_delta_cop": 0.0,
     "delta_cop_ref": 0.01,
     "enable_contact_quality_on_landing": False,
     "enable_contact_quality_on_stance": True,
     "gamma_land": 0.0,
     "gamma_st": 1.0,
-    "enable_stage_reward_warmup": True,
-    "stage_reward_warmup_steps": 8000,
+    "enable_stage_reward_warmup": False,
+    "stage_reward_warmup_steps": 5000,
     "enable_self_check": True,
 }
 
@@ -81,13 +90,13 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     seed=0,
     size=(8.0, 8.0),
     border_width=3,
-    num_rows=10,
-    num_cols=10,
+    num_rows=1,
+    num_cols=1,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
     use_cache=False,
-    curriculum=False,
+    curriculum=True,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
             proportion=0.0,
@@ -143,12 +152,12 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.4,
+            proportion=0,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0, 0, 0, 0],
+            wall_prob=[0.0, 0.0, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -170,7 +179,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_high": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0,
+            proportion=0.0,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -197,12 +206,12 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.0,
+            proportion=1.0,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.3, 0.3, 0.3, 0.3],
+            wall_prob=[0.0, 0.0, 0.0, 0.0],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -357,8 +366,6 @@ class SceneCfg(InteractiveSceneCfg):
         track_air_time=True,
         debug_vis = False
     )
-
-
     left_height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
         offset=RayCasterCfg.OffsetCfg(pos=(0.04, 0.0, 20.0)),
@@ -463,14 +470,6 @@ class ObservationsCfg:
         """Observations for policy group."""
 
         # observation terms (order preserved)
-        # foot_tactile = ObsTerm(
-        #     func=mdp.foot_tactile,
-        #     params={"sensor_cfg": SceneEntityCfg("foot_tactile")},
-        #     history_length=8,
-        #     flatten_history_dim=True,
-        #     noise=None,
-        # )
-
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
             noise=Unoise(n_min=-0.2, n_max=0.2),
@@ -508,7 +507,7 @@ class ObservationsCfg:
                 "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
                 "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
             },
-            history_length=4,
+            history_length=2,
             flatten_history_dim=True,
             noise=None,
         )
@@ -558,7 +557,7 @@ class ObservationsCfg:
                 "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
                 "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
             },
-            history_length=4,
+            history_length=2,
             flatten_history_dim=True,
             noise=None,
         )
@@ -834,7 +833,7 @@ class G1Rewards:
         params={
             **_STAGE_REWARD_V1_COMMON_PARAMS,
             "enable_prelanding_reward": True,
-            "w_pre_v": 0.24,
+            "w_pre_v": 0.28,
             "w_pre_a": 0.0,
             "enable_landing_event_penalty": False,
             "w_land_F": 0.0,
@@ -851,7 +850,7 @@ class G1Rewards:
         params={
             **_STAGE_REWARD_V1_COMMON_PARAMS,
             "enable_swing_clearance_reward": True,
-            "w_swing_h": 0.10,
+            "w_swing_h": 0.12,
             "swing_h_ref": 0.12,
             "enable_prelanding_reward": False,
             "w_pre_v": 0.0,
@@ -897,7 +896,7 @@ class G1Rewards:
             "w_land_dF": 0.0,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": True,
-            "w_cop": 0.24,
+            "w_cop": 0.28,
             "w_area": 0.0,
         },
     )
@@ -915,7 +914,7 @@ class G1Rewards:
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": True,
             "w_cop": 0.0,
-            "w_area": 0.18,
+            "w_area": 0.20,
         },
     )
     stage_stance_delta_cop_v1 = RewTerm(
@@ -989,7 +988,7 @@ class G1Rewards:
             "w_area": 0.0,
         },
     )
-
+#--------------------------------------------------------------------------------------------------------------------------------------
     energy = RewTerm(
         func=mdp.motors_power_square,
         weight=-5e-5,
@@ -1132,7 +1131,7 @@ class MonitorCfg:
 @configclass
 class ParkourEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
-    scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=2.5)
+    scene: SceneCfg = SceneCfg(num_envs=2048, env_spacing=2.5)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()

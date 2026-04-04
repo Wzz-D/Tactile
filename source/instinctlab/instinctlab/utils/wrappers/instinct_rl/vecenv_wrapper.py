@@ -162,6 +162,8 @@ class InstinctRlVecEnvWrapper(VecEnv):
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         # record step information
         obs_pack, rew, terminated, truncated, extras = self.env.step(actions)
+        extras["step"] = extras.get("step", {})
+        extras["step"].update(self._compute_foot_contact_state_step_stats(obs_pack))
         obs_pack = self._flatten_all_obs_groups(obs_pack)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)
@@ -242,3 +244,68 @@ class InstinctRlVecEnvWrapper(VecEnv):
             rewards.append(reward_value)
         rewards = torch.stack(rewards, dim=-1)
         return rewards
+
+    def _compute_foot_contact_state_step_stats(self, obs_pack: dict) -> dict[str, torch.Tensor]:
+        """Compute per-dimension mean/variance of latest foot_contact_state frame for TensorBoard."""
+        policy_obs = obs_pack.get("policy")
+        if not isinstance(policy_obs, dict) or "foot_contact_state" not in policy_obs:
+            return {}
+
+        term = policy_obs["foot_contact_state"]
+        if not torch.is_tensor(term):
+            return {}
+
+        latest = self._extract_latest_foot_contact_frame(term)
+        if latest is None or latest.numel() == 0:
+            return {}
+
+        latest = torch.nan_to_num(latest, nan=0.0, posinf=0.0, neginf=0.0)
+        feature_names = (
+            "contact_area_ratio",
+            "F_over_body_weight",
+            "cop_x_norm",
+            "cop_y_norm",
+            "vz_norm",
+        )
+        if latest.shape[-1] != len(feature_names):
+            return {}
+
+        stats = {}
+        for feature_id, feature_name in enumerate(feature_names):
+            values = latest[..., feature_id]
+            stats[f"FootContactState/{feature_name}_mean"] = values.mean()
+            stats[f"FootContactState/{feature_name}_var"] = values.var(unbiased=False)
+        return stats
+
+    def _extract_latest_foot_contact_frame(self, term: torch.Tensor) -> torch.Tensor | None:
+        """Return latest frame as (num_envs, num_feet, 5) from possible term layouts."""
+        num_feet = self._get_foot_contact_num_feet()
+        feature_dim = 5
+
+        if term.ndim == 2:
+            if term.shape[1] % feature_dim != 0 or num_feet <= 0:
+                return None
+            if term.shape[1] % (num_feet * feature_dim) != 0:
+                return None
+            history_length = term.shape[1] // (num_feet * feature_dim)
+            reshaped = term.reshape(term.shape[0], history_length, num_feet, feature_dim)
+            return reshaped[:, -1, :, :]
+
+        if term.ndim == 3 and term.shape[-1] == feature_dim:
+            # (N, num_feet, 5)
+            return term
+
+        if term.ndim == 4 and term.shape[-1] == feature_dim:
+            # (N, history, num_feet, 5)
+            return term[:, -1, :, :]
+
+        return None
+
+    def _get_foot_contact_num_feet(self) -> int:
+        stage_sensor = self.unwrapped.scene.sensors.get("contact_stage_filter", None)
+        if stage_sensor is not None:
+            return int(getattr(stage_sensor, "num_bodies", 0))
+        tactile_sensor = self.unwrapped.scene.sensors.get("foot_tactile", None)
+        if tactile_sensor is not None:
+            return int(getattr(tactile_sensor, "num_bodies", 0))
+        return 0
