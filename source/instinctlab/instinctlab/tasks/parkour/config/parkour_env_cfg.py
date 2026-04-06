@@ -78,8 +78,9 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "enable_contact_quality_on_stance": True,
     "gamma_land": 0.0,
     "gamma_st": 1.0,
-    "enable_stage_reward_warmup": False,
-    "stage_reward_warmup_steps": 5000,
+    "enable_stage_reward_warmup": True,
+    # Warmup horizon in PPO training iterations, aligned with TensorBoard's iteration axis.
+    "stage_reward_warmup_steps": 8000,
     "enable_self_check": True,
 }
 
@@ -90,8 +91,8 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     seed=0,
     size=(8.0, 8.0),
     border_width=3,
-    num_rows=1,
-    num_cols=1,
+    num_rows=10,
+    num_cols=20,
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
@@ -152,12 +153,12 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0,
+            proportion=0.5,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.0, 0.0, 0.0, 0.0],
+            wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -206,12 +207,12 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=1.0,
+            proportion=0.5,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
             border_width=1.0,
-            wall_prob=[0.0, 0.0, 0.0, 0.0],
+            wall_prob=[0.3, 0.3, 0.3, 0.3],
             wall_height=5.0,
             wall_thickness=0.05,
             perlin_cfg=terrain_gen.PerlinPlaneTerrainCfg(
@@ -740,7 +741,7 @@ class G1Rewards:
         func=mdp.track_ang_vel_z_exp, weight=2.0, params={"command_name": "base_velocity", "std": 0.5}
     )
     heading_error = RewTerm(func=mdp.heading_error, weight=-1.0, params={"command_name": "base_velocity"})
-    dont_wait = RewTerm(func=mdp.dont_wait, weight=-0.5, params={"command_name": "base_velocity"})
+    dont_wait = RewTerm(func=mdp.dont_wait, weight=-0.8, params={"command_name": "base_velocity"})
     is_alive = RewTerm(func=mdp.is_alive, weight=3.0)
     stand_still = RewTerm(func=mdp.stand_still, weight=-0.3, params={"command_name": "base_velocity", "offset": 4.0})
 
@@ -754,7 +755,7 @@ class G1Rewards:
     )
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
-        weight=0.5,
+        weight=0.6,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
@@ -896,7 +897,7 @@ class G1Rewards:
             "w_land_dF": 0.0,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": True,
-            "w_cop": 0.28,
+            "w_cop": 0.24,
             "w_area": 0.0,
         },
     )

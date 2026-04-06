@@ -337,6 +337,7 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_r_st_area = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_st_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
+        self._debug_r_contact_base = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_contact_phase_weight = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_r_contact = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._debug_landing_event_penalty = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
@@ -399,6 +400,7 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_r_st_area = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_st_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
+        self._debug_r_contact_base = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_contact_phase_weight = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_r_contact = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._debug_landing_event_penalty = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
@@ -567,6 +569,7 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_r_st_area[env_ids] = 0.0
         self._debug_r_st_delta_cop[env_ids] = 0.0
         self._debug_delta_cop[env_ids] = 0.0
+        self._debug_r_contact_base[env_ids] = 0.0
         self._debug_contact_phase_weight[env_ids] = 0.0
         self._debug_r_contact[env_ids] = 0.0
         self._debug_landing_event_penalty[env_ids] = 0.0
@@ -593,6 +596,7 @@ class contact_stage_reward_v1(ManagerTermBase):
             "delta_cop": self._debug_delta_cop[env_id].detach().clone(),
             "r_cop": self._debug_r_st_cop[env_id].detach().clone(),
             "r_area": self._debug_r_st_area[env_id].detach().clone(),
+            "r_contact_base": self._debug_r_contact_base[env_id].detach().clone(),
             "contact_phase_weight": self._debug_contact_phase_weight[env_id].detach().clone(),
             "r_contact": self._debug_r_contact[env_id].detach().clone(),
             "landing_F_peak": self._landing_F_peak[env_id].detach().clone(),
@@ -842,10 +846,14 @@ class contact_stage_reward_v1(ManagerTermBase):
         if enable_stage_reward_warmup:
             warmup_steps = max(int(stage_reward_warmup_steps), 0)
             if warmup_steps > 0:
-                common_steps_raw = getattr(env, "common_step_counter", None)
-                if common_steps_raw is not None:
-                    common_steps = float(max(int(common_steps_raw), 0))
-                    warmup_scale = min(common_steps / float(warmup_steps), 1.0)
+                warmup_iteration_getter = getattr(env, "get_stage_reward_warmup_iteration", None)
+                if callable(warmup_iteration_getter):
+                    warmup_progress = float(max(int(warmup_iteration_getter()), 0))
+                else:
+                    # Fallback for env variants that do not expose PPO iteration context.
+                    common_steps_raw = getattr(env, "common_step_counter", None)
+                    warmup_progress = float(max(int(common_steps_raw), 0)) if common_steps_raw is not None else 0.0
+                warmup_scale = min(warmup_progress / float(warmup_steps), 1.0)
         reward = torch.nan_to_num((R_stage + R_landing_event) * float(warmup_scale), nan=0.0, posinf=0.0, neginf=0.0)
 
         self._debug_alpha_sw[:] = torch.nan_to_num(alpha_sw, nan=0.0, posinf=0.0, neginf=0.0)
@@ -859,6 +867,7 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._debug_r_st_area[:] = torch.nan_to_num(r_area, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_st_delta_cop[:] = torch.nan_to_num(r_st_delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_delta_cop[:] = torch.nan_to_num(delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
+        self._debug_r_contact_base[:] = torch.nan_to_num(r_contact_base, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_contact_phase_weight[:] = torch.nan_to_num(contact_phase_weight, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_r_contact[:] = torch.nan_to_num(r_contact, nan=0.0, posinf=0.0, neginf=0.0)
         self._debug_landing_event_penalty[:] = landing_event_penalty_per_foot

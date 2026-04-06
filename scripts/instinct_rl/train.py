@@ -210,6 +210,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # load previously trained model
         runner.load(resume_path)
 
+    if hasattr(env.unwrapped, "configure_stage_reward_warmup_counter"):
+        env.unwrapped.configure_stage_reward_warmup_counter(
+            rollout_horizon_steps=agent_cfg.num_steps_per_env,
+            iteration_offset=runner.current_learning_iteration,
+        )
+        print(
+            "[INFO] Stage reward warmup uses training iterations: "
+            f"warmup_iteration={env.unwrapped.get_stage_reward_warmup_iteration()}, "
+            f"rollout_horizon_steps={agent_cfg.num_steps_per_env}, "
+            f"iteration_offset={runner.current_learning_iteration}"
+        )
+
     # dump the configuration into log-directory
     if not ("LOCAL_RANK" in os.environ and dist.get_rank() > 0):
         # prevent dumping the config in non-rank-0 process

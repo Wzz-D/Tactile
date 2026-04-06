@@ -65,15 +65,28 @@ class FootTactile(SensorBase):
         """Bind a contact sensor used to provide aggregate per-foot contact force."""
 
         self._contact_sensor = contact_sensor
+        tactile_body_names = list(self.body_names)
         if body_ids is None:
             if not hasattr(contact_sensor, "find_bodies"):
                 raise ValueError("contact_sensor must provide body_ids or implement find_bodies().")
-            resolved_ids, _ = contact_sensor.find_bodies(self.body_names, preserve_order=True)
+            resolved_ids, resolved_names = contact_sensor.find_bodies(tactile_body_names, preserve_order=True)
+            if list(resolved_names) != tactile_body_names:
+                raise ValueError(
+                    "FootTactile contact binding resolved unexpected body names: "
+                    f"expected={tactile_body_names}, got={list(resolved_names)}"
+                )
             body_ids = resolved_ids
 
         body_ids = tuple(int(body_id) for body_id in body_ids)
         if len(body_ids) != self.num_bodies:
             raise ValueError(f"Expected {self.num_bodies} contact body ids, but got {len(body_ids)}.")
+        if hasattr(contact_sensor, "body_names"):
+            contact_body_names = [str(contact_sensor.body_names[body_id]) for body_id in body_ids]
+            if contact_body_names != tactile_body_names:
+                raise ValueError(
+                    "FootTactile contact binding body-order mismatch: "
+                    f"tactile={tactile_body_names}, contact={contact_body_names}"
+                )
         self._contact_body_ids = body_ids
 
     def clear_contact_sensor_binding(self) -> None:
@@ -99,6 +112,25 @@ class FootTactile(SensorBase):
 
     def reset(self, env_ids: Sequence[int] | None = None):
         super().reset(env_ids)
+        env_ids_t = self._resolve_env_ids_tensor(slice(None) if env_ids is None else env_ids)
+
+        # Clear dynamic contact buffers on reset. With lazy sensor updates, leaving stale values here can
+        # leak the previous episode into post-reset diagnostics until the next recompute.
+        self._data.support_dist[env_ids_t] = float("inf")
+        self._data.support_valid_mask[env_ids_t] = False
+        self._data.support_normal_w[env_ids_t] = 0.0
+        self._data.support_alignment[env_ids_t] = 0.0
+        self._data.taxel_weight_clean[env_ids_t] = 0.0
+        self._data.taxel_weight_aligned[env_ids_t] = 0.0
+        self._data.total_normal_force[env_ids_t] = 0.0
+        self._data.taxel_force_clean[env_ids_t] = 0.0
+        self._data.taxel_force_diffused[env_ids_t] = 0.0
+        self._data.taxel_force[env_ids_t] = 0.0
+        self._data.contact_area_ratio[env_ids_t] = 0.0
+        self._data.edge_force_ratio[env_ids_t] = 0.0
+        self._data.peak_force[env_ids_t] = 0.0
+        self._data.mean_force[env_ids_t] = 0.0
+        self._data.cop_b[env_ids_t] = 0.0
         if hasattr(self, "_noise_model") and self._noise_model is not None:
             self._noise_model.reset(env_ids)
 
@@ -240,17 +272,18 @@ class FootTactile(SensorBase):
         )
 
     def _refresh_support_query(self, env_ids: Union[Sequence[int], slice]) -> None:
-        support_dist = self._data.support_dist[env_ids]
-        support_valid_mask = self._data.support_valid_mask[env_ids]
-        support_normal_w = self._data.support_normal_w[env_ids]
-        support_alignment = self._data.support_alignment[env_ids]
-
-        support_dist.fill_(float("inf"))
-        support_valid_mask.zero_()
-        support_normal_w.zero_()
-        support_alignment.zero_()
+        # `tensor[env_ids]` is a copy when `env_ids` is a tensor subset. Build local buffers and assign them
+        # back explicitly so partial sensor refreshes after reset really update backing storage.
+        support_dist = torch.full_like(self._data.support_dist[env_ids], float("inf"))
+        support_valid_mask = torch.zeros_like(self._data.support_valid_mask[env_ids])
+        support_normal_w = torch.zeros_like(self._data.support_normal_w[env_ids])
+        support_alignment = torch.zeros_like(self._data.support_alignment[env_ids])
 
         if self._support_mesh_wp is None:
+            self._data.support_dist[env_ids] = support_dist
+            self._data.support_valid_mask[env_ids] = support_valid_mask
+            self._data.support_normal_w[env_ids] = support_normal_w
+            self._data.support_alignment[env_ids] = support_alignment
             return
 
         taxel_pos_w = self._data.taxel_pos_w[env_ids]
@@ -274,6 +307,10 @@ class FootTactile(SensorBase):
             return_normal=True,
         )
         if ray_dist_f is None or ray_normal_f is None:
+            self._data.support_dist[env_ids] = support_dist
+            self._data.support_valid_mask[env_ids] = support_valid_mask
+            self._data.support_normal_w[env_ids] = support_normal_w
+            self._data.support_alignment[env_ids] = support_alignment
             return
 
         ray_dist = ray_dist_f.reshape(E, B, T)
@@ -291,12 +328,16 @@ class FootTactile(SensorBase):
 
         support_dist[:] = torch.nan_to_num(support_dist, nan=float("inf"), posinf=float("inf"), neginf=float("inf"))
         support_alignment[:] = torch.nan_to_num(support_alignment, nan=0.0, posinf=0.0, neginf=0.0)
+        self._data.support_dist[env_ids] = support_dist
+        self._data.support_valid_mask[env_ids] = support_valid_mask
+        self._data.support_normal_w[env_ids] = support_normal_w
+        self._data.support_alignment[env_ids] = support_alignment
 
     def _refresh_total_normal_force(self, env_ids: Union[Sequence[int], slice]) -> None:
-        total_normal_force = self._data.total_normal_force[env_ids]
-        total_normal_force.zero_()
+        total_normal_force = torch.zeros_like(self._data.total_normal_force[env_ids])
 
         if self._contact_sensor is None or self._contact_body_ids is None:
+            self._data.total_normal_force[env_ids] = total_normal_force
             return
 
         net_forces_w_history = self._contact_sensor.data.net_forces_w_history
@@ -310,6 +351,7 @@ class FootTactile(SensorBase):
             torch.zeros_like(projected_force),
         )
         total_normal_force[:] = torch.nan_to_num(projected_force, nan=0.0, posinf=0.0, neginf=0.0)
+        self._data.total_normal_force[env_ids] = total_normal_force
 
     def _refresh_taxel_force(self, env_ids: Union[Sequence[int], slice]) -> None:
         env_ids_t = self._resolve_env_ids_tensor(env_ids)

@@ -49,6 +49,9 @@ parser.add_argument("--foot_metrics_env_id", type=int, default=0, help="Environm
 parser.add_argument("--h_eff_debug", action="store_true", default=False, help="Print per-step left/right foot h_eff from contact_stage_filter.")
 parser.add_argument("--h_eff_print_every", type=int, default=1, help="Print h_eff every N steps.")
 parser.add_argument("--h_eff_env_id", type=int, default=0, help="Environment index used for h_eff debug output.")
+parser.add_argument("--stage_debug", action="store_true", default=False, help="Print compact per-foot stage gating debug periodically.")
+parser.add_argument("--stage_debug_print_every", type=int, default=20, help="Print stage debug every N steps.")
+parser.add_argument("--stage_debug_env_id", type=int, default=0, help="Environment index used for stage debug output.")
 parser.add_argument("--eval_mode", action="store_true", default=False, help="Evaluate first episode of each env and dump stage-wise metrics.")
 parser.add_argument("--eval_max_steps", type=int, default=20000, help="Maximum simulation steps in eval mode before forced stop.")
 parser.add_argument("--eval_progress_every", type=int, default=200, help="Print eval progress every N steps.")
@@ -196,6 +199,47 @@ def _print_foot_contact_obs_sample(obs: torch.Tensor, env, env_id: int = 0) -> N
         print(
             f"[ObsDebug env={env_id} {foot_name}] "
             f"area={area:.4f}, F/BW={f_over_bw:.4f}, COPnorm=({cop_x:.4f},{cop_y:.4f}), vz_norm={vz:.4f}"
+        )
+
+
+def _print_stage_debug_sample(env, timestep: int, env_id: int, stage_reward_debug_term: object | None) -> None:
+    if "contact_stage_filter" not in env.unwrapped.scene.sensors:
+        print("[StageDebug] 'contact_stage_filter' sensor is not available.")
+        return
+
+    stage_sensor = env.unwrapped.scene.sensors["contact_stage_filter"]
+    env_id = max(0, min(env_id, env.num_envs - 1))
+    foot_names = list(stage_sensor.body_names)
+
+    print(f"[StageDebug step={timestep} env={env_id}]")
+    for foot_id in range(stage_sensor.num_bodies):
+        print(stage_sensor.get_stage_debug_string(env_id, foot_id))
+
+    if stage_reward_debug_term is None or not hasattr(stage_reward_debug_term, "get_debug_dict"):
+        return
+
+    stage_rew_dbg = stage_reward_debug_term.get_debug_dict(env_id)
+    for foot_id in range(stage_sensor.num_bodies):
+        foot_name = foot_names[foot_id] if foot_id < len(foot_names) else f"foot_{foot_id}"
+        alpha_sw = float(stage_rew_dbg["alpha_sw"][foot_id].item())
+        alpha_pre = float(stage_rew_dbg["alpha_pre"][foot_id].item())
+        alpha_land = float(stage_rew_dbg["alpha_land"][foot_id].item())
+        alpha_st = float(stage_rew_dbg["alpha_st"][foot_id].item())
+        r_pre_v = float(stage_rew_dbg["r_pre_v"][foot_id].item())
+        r_pre_a = float(stage_rew_dbg["r_pre_a"][foot_id].item())
+        r_contact_base = float(stage_rew_dbg["r_contact_base"][foot_id].item())
+        r_contact = float(stage_rew_dbg["r_contact"][foot_id].item())
+        contact_phase_weight = float(stage_rew_dbg["contact_phase_weight"][foot_id].item())
+        area_ratio = float(stage_rew_dbg["contact_area_ratio"][foot_id].item())
+        cop_margin = float(stage_rew_dbg["cop_margin"][foot_id].item())
+        landing_window = int(stage_rew_dbg["landing_window"][foot_id].item())
+        print(
+            f"[StageReward step={timestep} env={env_id} foot={foot_id}({foot_name})] "
+            f"alpha=({alpha_sw:.3f},{alpha_pre:.3f},{alpha_land:.3f},{alpha_st:.3f}) "
+            f"r_pre=({r_pre_v:.3f},{r_pre_a:.3f}) "
+            f"r_contact_base={r_contact_base:.3f} phase_w={contact_phase_weight:.3f} "
+            f"r_contact={r_contact:.3f} area={area_ratio:.3f} cop_margin={cop_margin:.3f} "
+            f"landing_window={landing_window}"
         )
 
 
@@ -437,6 +481,15 @@ def main():
             )
         if "contact_stage_filter" not in env.unwrapped.scene.sensors:
             raise RuntimeError("--h_eff_debug requires 'contact_stage_filter' sensor in the scene.")
+    if args_cli.stage_debug:
+        if args_cli.stage_debug_print_every <= 0:
+            raise ValueError("--stage_debug_print_every must be > 0.")
+        if args_cli.stage_debug_env_id < 0 or args_cli.stage_debug_env_id >= env.num_envs:
+            raise ValueError(
+                f"--stage_debug_env_id must be in [0, {env.num_envs - 1}], got {args_cli.stage_debug_env_id}."
+            )
+        if "contact_stage_filter" not in env.unwrapped.scene.sensors:
+            raise RuntimeError("--stage_debug requires 'contact_stage_filter' sensor in the scene.")
     if args_cli.eval_mode:
         if args_cli.eval_max_steps <= 0:
             raise ValueError("--eval_max_steps must be > 0.")
@@ -640,6 +693,12 @@ def main():
                         for i in range(h_eff.numel())
                     )
                     print(f"[h_eff step={timestep} env={env_id}] {values}")
+
+            if args_cli.stage_debug and timestep % args_cli.stage_debug_print_every == 0:
+                if not stage_reward_debug_lookup_done:
+                    stage_reward_debug_lookup_done = True
+                    stage_reward_debug_term = _find_stage_reward_debug_term(env)
+                _print_stage_debug_sample(env, timestep, args_cli.stage_debug_env_id, stage_reward_debug_term)
 
             if args_cli.foot_debug_full:
                 print("--------------------------------Foot Debug--------------------------")

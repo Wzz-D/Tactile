@@ -1,0 +1,4 @@
+训练计划待办：
+1. StageV4 训上下楼梯和上下高台对比baseline看效果；
+2. 尝试double Critic方法；
+3. 学习BeamDojo中半踩问题的解决方法

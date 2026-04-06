@@ -64,38 +64,95 @@ class ContactStageFilter(SensorBase):
             return cls.STAGE_NAMES[stage_id]
         return f"Unknown({stage_id})"
 
+    def get_debug_tensors(self) -> dict[str, torch.Tensor]:
+        """Return read-only per-env/per-foot tensors used by stage gating and debugging."""
+
+        stage_data = self.data
+        stage_eligibility = torch.nan_to_num(
+            stage_data.stage_eligibility,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        landing_window_active = stage_data.landing_window > 0
+        h_zone_hit = stage_data.h_eff < float(self.cfg.h_zone)
+        v_pre_hit = stage_data.foot_vz < -float(self.cfg.v_pre)
+        force_on_hit = stage_data.total_force > float(self.cfg.contact_force_on)
+        area_on_hit = stage_data.contact_area > float(self.cfg.contact_area_on)
+
+        return {
+            "h_eff": stage_data.h_eff,
+            "foot_vz": stage_data.foot_vz,
+            "total_force": stage_data.total_force,
+            "total_force_filt": stage_data.total_force_filt,
+            "contact_area": stage_data.contact_area,
+            "contact_area_filt": stage_data.contact_area_filt,
+            "dF": stage_data.dF,
+            "dA": stage_data.dA,
+            "contact_active": stage_data.contact_active,
+            "contact_on_event": stage_data.contact_on_event,
+            "contact_off_event": stage_data.contact_off_event,
+            "landing_window": stage_data.landing_window,
+            "landing_window_active": landing_window_active,
+            "stage_eligibility": stage_eligibility,
+            "dominant_stage_id": stage_data.dominant_stage_id,
+            "h_zone_hit": h_zone_hit,
+            "v_pre_hit": v_pre_hit,
+            "force_on_hit": force_on_hit,
+            "area_on_hit": area_on_hit,
+            "E_sw": stage_eligibility[..., self.STAGE_SWING] > 0.5,
+            "E_pre": stage_eligibility[..., self.STAGE_PRELANDING] > 0.5,
+            "E_land": stage_eligibility[..., self.STAGE_LANDING] > 0.5,
+            "E_st": stage_eligibility[..., self.STAGE_STANCE] > 0.5,
+        }
+
+    def get_debug_dict(self, env_id: int) -> dict[str, torch.Tensor]:
+        """Return cloned per-foot tensors for one environment."""
+
+        debug_tensors = self.get_debug_tensors()
+        env_id = int(max(0, min(env_id, self._num_envs - 1)))
+        return {name: tensor[env_id].detach().clone() for name, tensor in debug_tensors.items()}
+
     def get_stage_debug_string(self, env_id: int, foot_id: int) -> str:
         """Return compact per-foot debug info for stage filtering."""
-        self._update_outdated_buffers()
+        debug_dict = self.get_debug_dict(env_id)
 
-        stage_id = int(self._data.dominant_stage_id[env_id, foot_id].item())
+        stage_id = int(debug_dict["dominant_stage_id"][foot_id].item())
         stage_name = self.stage_id_to_name(stage_id)
+        eligibility = debug_dict["stage_eligibility"][foot_id].detach().cpu().tolist()
 
-        eligibility = self._data.stage_eligibility[env_id, foot_id].detach().cpu().tolist()
-
-        contact_active = bool(self._data.contact_active[env_id, foot_id].item())
-        landing_window = int(self._data.landing_window[env_id, foot_id].item())
+        contact_active = bool(debug_dict["contact_active"][foot_id].item())
+        contact_on_event = bool(debug_dict["contact_on_event"][foot_id].item())
+        contact_off_event = bool(debug_dict["contact_off_event"][foot_id].item())
+        landing_window = int(debug_dict["landing_window"][foot_id].item())
+        landing_window_active = bool(debug_dict["landing_window_active"][foot_id].item())
         tau_on = float(self._data.tau_on[env_id, foot_id].item())
         tau_off = float(self._data.tau_off[env_id, foot_id].item())
         tau_stage = float(self._data.tau_stage[env_id, foot_id].item())
 
-        h_eff = float(self._data.h_eff[env_id, foot_id].item())
-        vz = float(self._data.foot_vz[env_id, foot_id].item())
-        force = float(self._data.total_force[env_id, foot_id].item())
-        force_filt = float(self._data.total_force_filt[env_id, foot_id].item())
-        area = float(self._data.contact_area[env_id, foot_id].item())
-        area_filt = float(self._data.contact_area_filt[env_id, foot_id].item())
-        d_force = float(self._data.dF[env_id, foot_id].item())
-        d_area = float(self._data.dA[env_id, foot_id].item())
+        h_eff = float(debug_dict["h_eff"][foot_id].item())
+        vz = float(debug_dict["foot_vz"][foot_id].item())
+        force = float(debug_dict["total_force"][foot_id].item())
+        force_filt = float(debug_dict["total_force_filt"][foot_id].item())
+        area = float(debug_dict["contact_area"][foot_id].item())
+        area_filt = float(debug_dict["contact_area_filt"][foot_id].item())
+        d_force = float(debug_dict["dF"][foot_id].item())
+        d_area = float(debug_dict["dA"][foot_id].item())
         rho_fore = float(self._data.rho_fore[env_id, foot_id].item())
         pre_core = bool(self._debug_pre_core[env_id, foot_id].item())
+        h_zone_hit = bool(debug_dict["h_zone_hit"][foot_id].item())
+        v_pre_hit = bool(debug_dict["v_pre_hit"][foot_id].item())
+        force_on_hit = bool(debug_dict["force_on_hit"][foot_id].item())
+        area_on_hit = bool(debug_dict["area_on_hit"][foot_id].item())
 
         return (
             f"ContactStage(env={env_id}, foot={foot_id}, stage={stage_name}, "
-            f"contact_active={contact_active}, landing_window={landing_window}, tau_on={tau_on:.3f}, "
+            f"contact_active={contact_active}, on_event={contact_on_event}, off_event={contact_off_event}, "
+            f"landing_window={landing_window}, landing_active={landing_window_active}, tau_on={tau_on:.3f}, "
             f"tau_off={tau_off:.3f}, tau_stage={tau_stage:.3f}, h_eff={h_eff:.3f}, vz={vz:.3f}, "
             f"F={force:.3f}, Ff={force_filt:.3f}, A={area:.3f}, Af={area_filt:.3f}, "
             f"dF={d_force:.3f}, dA={d_area:.3f}, rho_fore={rho_fore:.3f}, pre_core={pre_core}, "
+            f"hits=(h:{h_zone_hit},vz:{v_pre_hit},F:{force_on_hit},A:{area_on_hit}), "
             f"E={[round(v, 3) for v in eligibility]})"
         )
 
@@ -105,10 +162,23 @@ class ContactStageFilter(SensorBase):
     def bind_tactile_sensor(self, tactile_sensor: Any) -> None:
         self._tactile_sensor = tactile_sensor
         self._tactile_body_ids = tuple(range(self.num_bodies))
+        stage_body_names = list(self.body_names)
         if hasattr(tactile_sensor, "find_bodies") and hasattr(tactile_sensor, "body_names"):
-            ids, _ = tactile_sensor.find_bodies(self.body_names, preserve_order=True)
+            ids, tactile_body_names = tactile_sensor.find_bodies(stage_body_names, preserve_order=True)
             if len(ids) == self.num_bodies:
+                if list(tactile_body_names) != stage_body_names:
+                    raise ValueError(
+                        "ContactStageFilter tactile binding resolved unexpected body names: "
+                        f"expected={stage_body_names}, got={list(tactile_body_names)}"
+                    )
                 self._tactile_body_ids = tuple(int(body_id) for body_id in ids)
+        if hasattr(tactile_sensor, "body_names"):
+            resolved_tactile_names = [str(tactile_sensor.body_names[body_id]) for body_id in self._tactile_body_ids]
+            if resolved_tactile_names != stage_body_names:
+                raise ValueError(
+                    "ContactStageFilter tactile binding body-order mismatch: "
+                    f"stage={stage_body_names}, tactile={resolved_tactile_names}"
+                )
         self._geometry_ready = False
 
     def clear_tactile_sensor_binding(self) -> None:
@@ -264,10 +334,12 @@ class ContactStageFilter(SensorBase):
         self._data.foot_theta[env_ids] = torch.nan_to_num(self._data.foot_theta[env_ids], nan=0.0, posinf=0.0, neginf=0.0)
 
     def _refresh_h_eff(self, env_ids: Union[Sequence[int], slice]) -> None:
-        h_eff = self._data.h_eff[env_ids]
-        h_eff.fill_(float(self.cfg.h_eff_max_dist))
+        # `tensor[env_ids]` is a copy when `env_ids` is a tensor subset. Use local buffers and write them
+        # back explicitly so partial sensor refreshes after reset do not silently drop updates.
+        h_eff = torch.full_like(self._data.h_eff[env_ids], float(self.cfg.h_eff_max_dist))
 
         if self._support_mesh_wp is None:
+            self._data.h_eff[env_ids] = h_eff
             return
 
         foot_pos_w = self._foot_pos_w[env_ids]
@@ -290,6 +362,7 @@ class ContactStageFilter(SensorBase):
             return_normal=False,
         )
         if ray_dist_f is None:
+            self._data.h_eff[env_ids] = h_eff
             return
 
         ray_dist = ray_dist_f.reshape(E, B)
@@ -297,25 +370,25 @@ class ContactStageFilter(SensorBase):
         h_local = torch.clamp(ray_dist - offset, min=0.0, max=max_dist)
         h_eff[valid_hits] = h_local[valid_hits]
         h_eff[:] = torch.nan_to_num(h_eff, nan=max_dist, posinf=max_dist, neginf=max_dist)
+        self._data.h_eff[env_ids] = h_eff
 
     def _refresh_tactile_statistics(self, env_ids: Union[Sequence[int], slice]) -> None:
-        total_force = self._data.total_force[env_ids]
-        total_force_filt = self._data.total_force_filt[env_ids]
-        contact_area = self._data.contact_area[env_ids]
-        contact_area_filt = self._data.contact_area_filt[env_ids]
-        cop_ap = self._data.cop_ap[env_ids]
-        rho_peak = self._data.rho_peak[env_ids]
-        rho_fore = self._data.rho_fore[env_ids]
-
-        total_force.zero_()
-        contact_area.zero_()
-        cop_ap.zero_()
-        rho_peak.zero_()
-        rho_fore.zero_()
+        total_force = torch.zeros_like(self._data.total_force[env_ids])
+        total_force_filt_prev = self._data.total_force_filt[env_ids]
+        contact_area = torch.zeros_like(self._data.contact_area[env_ids])
+        contact_area_filt_prev = self._data.contact_area_filt[env_ids]
+        cop_ap = torch.zeros_like(self._data.cop_ap[env_ids])
+        rho_peak = torch.zeros_like(self._data.rho_peak[env_ids])
+        rho_fore = torch.zeros_like(self._data.rho_fore[env_ids])
 
         if self._tactile_sensor is None:
-            total_force_filt.zero_()
-            contact_area_filt.zero_()
+            self._data.total_force[env_ids] = total_force
+            self._data.total_force_filt[env_ids] = 0.0
+            self._data.contact_area[env_ids] = contact_area
+            self._data.contact_area_filt[env_ids] = 0.0
+            self._data.cop_ap[env_ids] = cop_ap
+            self._data.rho_peak[env_ids] = rho_peak
+            self._data.rho_fore[env_ids] = rho_fore
             self._data.dF[env_ids] = 0.0
             self._data.dA[env_ids] = 0.0
             self._filter_initialized[env_ids] = False
@@ -352,8 +425,8 @@ class ContactStageFilter(SensorBase):
         force_raw = torch.nan_to_num(total_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
         area_raw = torch.nan_to_num(contact_area, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
 
-        prev_force_filt = total_force_filt.clone()
-        prev_area_filt = contact_area_filt.clone()
+        prev_force_filt = total_force_filt_prev.clone()
+        prev_area_filt = contact_area_filt_prev.clone()
         initialized = self._filter_initialized[env_ids]
 
         alpha = float(min(max(self.cfg.derivative_filter_alpha, 0.0), 1.0))
@@ -368,21 +441,20 @@ class ContactStageFilter(SensorBase):
         d_force = torch.where(initialized, d_force, torch.zeros_like(d_force))
         d_area = torch.where(initialized, d_area, torch.zeros_like(d_area))
 
-        total_force_filt[:] = force_filt
-        contact_area_filt[:] = area_filt
+        total_force_filt = force_filt
+        contact_area_filt = area_filt
+        self._data.total_force[env_ids] = torch.nan_to_num(total_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        self._data.total_force_filt[env_ids] = torch.nan_to_num(total_force_filt, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        self._data.contact_area[env_ids] = torch.nan_to_num(contact_area, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+        self._data.contact_area_filt[env_ids] = torch.nan_to_num(contact_area_filt, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+        self._data.cop_ap[env_ids] = torch.nan_to_num(cop_ap, nan=0.0, posinf=0.0, neginf=0.0)
+        self._data.rho_peak[env_ids] = torch.nan_to_num(rho_peak, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        self._data.rho_fore[env_ids] = torch.nan_to_num(rho_fore, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
         self._data.dF[env_ids] = d_force
         self._data.dA[env_ids] = d_area
         self._filter_initialized[env_ids] = True
-
-        self._data.total_force[env_ids] = torch.nan_to_num(self._data.total_force[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        self._data.total_force_filt[env_ids] = torch.nan_to_num(self._data.total_force_filt[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        self._data.contact_area[env_ids] = torch.nan_to_num(self._data.contact_area[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
-        self._data.contact_area_filt[env_ids] = torch.nan_to_num(self._data.contact_area_filt[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
         self._data.dF[env_ids] = torch.nan_to_num(self._data.dF[env_ids], nan=0.0, posinf=0.0, neginf=0.0)
         self._data.dA[env_ids] = torch.nan_to_num(self._data.dA[env_ids], nan=0.0, posinf=0.0, neginf=0.0)
-        self._data.cop_ap[env_ids] = torch.nan_to_num(self._data.cop_ap[env_ids], nan=0.0, posinf=0.0, neginf=0.0)
-        self._data.rho_peak[env_ids] = torch.nan_to_num(self._data.rho_peak[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-        self._data.rho_fore[env_ids] = torch.nan_to_num(self._data.rho_fore[env_ids], nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
 
     def _refresh_contact_events(self, env_ids: Union[Sequence[int], slice]) -> None:
         force = self._data.total_force[env_ids]

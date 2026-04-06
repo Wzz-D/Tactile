@@ -163,7 +163,10 @@ class InstinctRlVecEnvWrapper(VecEnv):
         # record step information
         obs_pack, rew, terminated, truncated, extras = self.env.step(actions)
         extras["step"] = extras.get("step", {})
+        extras["step"].update(self._compute_reset_step_stats(terminated, truncated))
         extras["step"].update(self._compute_foot_contact_state_step_stats(obs_pack))
+        extras["step"].update(self._compute_foot_tactile_step_stats())
+        extras["step"].update(self._compute_contact_stage_step_stats())
         obs_pack = self._flatten_all_obs_groups(obs_pack)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)
@@ -276,6 +279,176 @@ class InstinctRlVecEnvWrapper(VecEnv):
             stats[f"FootContactState/{feature_name}_mean"] = values.mean()
             stats[f"FootContactState/{feature_name}_var"] = values.var(unbiased=False)
         return stats
+
+    def _compute_reset_step_stats(self, terminated: torch.Tensor, truncated: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Expose reset rates so post-reset diagnostics can be interpreted correctly."""
+
+        if not torch.is_tensor(terminated) or not torch.is_tensor(truncated):
+            return {}
+
+        terminated_f = torch.nan_to_num(terminated.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        truncated_f = torch.nan_to_num(truncated.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        reset_f = torch.clamp(terminated_f + truncated_f, min=0.0, max=1.0)
+        return {
+            "Env/reset_rate": reset_f.mean(),
+            "Env/reset_terminated_rate": terminated_f.mean(),
+            "Env/reset_timeout_rate": truncated_f.mean(),
+        }
+
+    def _compute_foot_tactile_step_stats(self) -> dict[str, torch.Tensor]:
+        """Compute direct FootTactile diagnostics from current sensor buffers."""
+
+        tactile_sensor = self.unwrapped.scene.sensors.get("foot_tactile", None)
+        if tactile_sensor is None:
+            return {}
+
+        tactile_data = tactile_sensor.data
+        stats: dict[str, torch.Tensor] = {}
+
+        total_force = getattr(tactile_data, "total_normal_force", None)
+        taxel_force = getattr(tactile_data, "taxel_force", None)
+        contact_area_ratio = getattr(tactile_data, "contact_area_ratio", None)
+        support_valid_mask = getattr(tactile_data, "support_valid_mask", None)
+        support_dist = getattr(tactile_data, "support_dist", None)
+        valid_taxel_mask = getattr(tactile_data, "valid_taxel_mask", None)
+
+        self._append_foot_tactile_float_stats(stats, total_force, "total_normal_force")
+        self._append_foot_tactile_float_stats(stats, contact_area_ratio, "contact_area_ratio")
+
+        if torch.is_tensor(taxel_force) and taxel_force.numel() > 0:
+            taxel_force_f = torch.nan_to_num(taxel_force.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+            taxel_force_sum = taxel_force_f.sum(dim=-1)
+            self._append_foot_tactile_float_stats(stats, taxel_force_sum, "taxel_force_sum")
+            if torch.is_tensor(total_force) and total_force.shape == taxel_force_sum.shape:
+                total_force_f = torch.nan_to_num(total_force.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+                force_delta = taxel_force_sum - total_force_f
+                stats["FootTactile/force_consistency_signed_mean"] = force_delta.mean()
+                stats["FootTactile/force_consistency_abs_mean"] = force_delta.abs().mean()
+                stats["FootTactile/force_consistency_abs_max"] = force_delta.abs().max()
+
+        if (
+            torch.is_tensor(support_valid_mask)
+            and torch.is_tensor(support_dist)
+            and torch.is_tensor(valid_taxel_mask)
+            and support_valid_mask.ndim == 3
+            and support_dist.shape == support_valid_mask.shape
+        ):
+            template_valid = valid_taxel_mask.unsqueeze(0).expand_as(support_valid_mask)
+            support_valid = support_valid_mask & template_valid
+            valid_count = template_valid.sum(dim=-1).clamp_min(1)
+            support_ratio = support_valid.to(dtype=torch.float32).sum(dim=-1) / valid_count.to(dtype=torch.float32)
+            self._append_foot_tactile_float_stats(stats, support_ratio, "support_valid_ratio")
+
+            support_dist_f = torch.nan_to_num(support_dist.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+            support_valid_f = support_valid.to(dtype=torch.float32)
+            support_dist_sum = (support_dist_f * support_valid_f).sum(dim=-1)
+            support_valid_count = support_valid_f.sum(dim=-1)
+            support_dist_mean = torch.where(
+                support_valid_count > 0.0,
+                support_dist_sum / support_valid_count.clamp_min(1.0),
+                torch.zeros_like(support_dist_sum),
+            )
+            self._append_foot_tactile_float_stats(stats, support_dist_mean, "support_dist_valid_mean")
+
+        return stats
+
+    def _compute_contact_stage_step_stats(self) -> dict[str, torch.Tensor]:
+        """Compute mean/rate diagnostics from ContactStageFilter for TensorBoard."""
+
+        stage_sensor = self.unwrapped.scene.sensors.get("contact_stage_filter", None)
+        if stage_sensor is None or not hasattr(stage_sensor, "get_debug_tensors"):
+            return {}
+
+        debug_tensors = stage_sensor.get_debug_tensors()
+        if not isinstance(debug_tensors, dict) or len(debug_tensors) == 0:
+            return {}
+
+        stats: dict[str, torch.Tensor] = {}
+        bool_metric_specs = (
+            ("contact_active", "contact_active_mean", True),
+            ("contact_on_event", "contact_on_event_rate", False),
+            ("contact_off_event", "contact_off_event_rate", False),
+            ("landing_window_active", "landing_window_active_rate", False),
+            ("E_sw", "E_sw_rate", False),
+            ("E_pre", "E_pre_rate", False),
+            ("E_land", "E_land_rate", False),
+            ("E_st", "E_st_rate", False),
+            ("h_zone_hit", "h_zone_hit_rate", False),
+            ("v_pre_hit", "v_pre_hit_rate", False),
+            ("force_on_hit", "force_on_hit_rate", False),
+            ("area_on_hit", "area_on_hit_rate", False),
+        )
+        for source_name, overall_name, include_var in bool_metric_specs:
+            self._append_contact_stage_bool_stats(
+                stats,
+                debug_tensors.get(source_name),
+                metric_name=source_name,
+                overall_name=overall_name,
+                include_var=include_var,
+            )
+
+        for metric_name in ("h_eff", "foot_vz", "total_force", "contact_area"):
+            self._append_contact_stage_float_stats(stats, debug_tensors.get(metric_name), metric_name)
+        return stats
+
+    def _append_foot_tactile_float_stats(
+        self,
+        stats: dict[str, torch.Tensor],
+        values: torch.Tensor | None,
+        metric_name: str,
+    ) -> None:
+        if not torch.is_tensor(values) or values.numel() == 0:
+            return
+        values_f = torch.nan_to_num(values.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        stats[f"FootTactile/{metric_name}_mean"] = values_f.mean()
+        stats[f"FootTactile/{metric_name}_var"] = values_f.var(unbiased=False)
+        if values_f.ndim == 2:
+            if values_f.shape[1] >= 1:
+                stats[f"FootTactile/{metric_name}_left_mean"] = values_f[:, 0].mean()
+            if values_f.shape[1] >= 2:
+                stats[f"FootTactile/{metric_name}_right_mean"] = values_f[:, 1].mean()
+
+    def _append_contact_stage_bool_stats(
+        self,
+        stats: dict[str, torch.Tensor],
+        values: torch.Tensor | None,
+        metric_name: str,
+        overall_name: str,
+        include_var: bool,
+    ) -> None:
+        if not torch.is_tensor(values) or values.numel() == 0:
+            return
+        values_f = torch.nan_to_num(values.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        stats[f"ContactStage/{overall_name}"] = values_f.mean()
+        if include_var:
+            stats[f"ContactStage/{metric_name}_var"] = values_f.var(unbiased=False)
+        self._append_contact_stage_side_means(stats, metric_name, values_f)
+
+    def _append_contact_stage_float_stats(
+        self,
+        stats: dict[str, torch.Tensor],
+        values: torch.Tensor | None,
+        metric_name: str,
+    ) -> None:
+        if not torch.is_tensor(values) or values.numel() == 0:
+            return
+        values_f = torch.nan_to_num(values.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        stats[f"ContactStage/{metric_name}_mean"] = values_f.mean()
+        stats[f"ContactStage/{metric_name}_var"] = values_f.var(unbiased=False)
+        self._append_contact_stage_side_means(stats, metric_name, values_f)
+
+    def _append_contact_stage_side_means(
+        self,
+        stats: dict[str, torch.Tensor],
+        metric_name: str,
+        values: torch.Tensor,
+    ) -> None:
+        if values.ndim != 2:
+            return
+        if values.shape[1] >= 1:
+            stats[f"ContactStage/{metric_name}_left_mean"] = values[:, 0].mean()
+        if values.shape[1] >= 2:
+            stats[f"ContactStage/{metric_name}_right_mean"] = values[:, 1].mean()
 
     def _extract_latest_foot_contact_frame(self, term: torch.Tensor) -> torch.Tensor | None:
         """Return latest frame as (num_envs, num_feet, 5) from possible term layouts."""
