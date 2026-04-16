@@ -32,6 +32,26 @@ gym.register(
 )
 
 gym.register(
+    id="Instinct-Parkour-Target-Amp-G1-DualCritic-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourDualCriticEnvCfg",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_amp_cfg:G1ParkourDualCriticPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Instinct-Parkour-Target-Amp-G1-DualCritic-Play-v0",
+    entry_point="instinctlab.envs:InstinctRlEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{task_entry}.g1_parkour_target_amp_cfg:G1ParkourDualCriticEnvCfg_PLAY",
+        "instinct_rl_cfg_entry_point": f"{agents.__name__}.instinct_rl_amp_cfg:G1ParkourDualCriticPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Instinct-Parkour-StandDebug-G1-Play-v0",
     entry_point="instinctlab.envs:InstinctRlEnv",
     disable_env_checker=True,

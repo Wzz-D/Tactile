@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 from dataclasses import MISSING
@@ -503,7 +504,7 @@ class ObservationsCfg:
         )
         actions = ObsTerm(func=mdp.last_action, history_length=8, flatten_history_dim=True)
         foot_contact_state = ObsTerm(
-            func=mdp.foot_contact_state,
+            func=mdp.foot_contact_state_actor,
             params={
                 "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
                 "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
@@ -557,6 +558,15 @@ class ObservationsCfg:
             params={
                 "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
                 "tactile_sensor_cfg": SceneEntityCfg("foot_tactile"),
+            },
+            history_length=2,
+            flatten_history_dim=True,
+            noise=None,
+        )
+        stage_one_hot_state = ObsTerm(
+            func=mdp.stage_one_hot_state,
+            params={
+                "stage_sensor_cfg": SceneEntityCfg("contact_stage_filter"),
             },
             history_length=2,
             flatten_history_dim=True,
@@ -734,14 +744,15 @@ class G1Rewards:
     # Task rewards
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
-        weight=2.0,
+        weight=2.2,
         params={"command_name": "base_velocity", "std": 0.5},
     )
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp, weight=2.0, params={"command_name": "base_velocity", "std": 0.5}
     )
     heading_error = RewTerm(func=mdp.heading_error, weight=-1.0, params={"command_name": "base_velocity"})
-    dont_wait = RewTerm(func=mdp.dont_wait, weight=-0.8, params={"command_name": "base_velocity"})
+    dont_wait = RewTerm(func=mdp.dont_wait, weight=-1.0, params={"command_name": "base_velocity"})
+    target_reached = RewTerm(func=mdp.target_reached, weight=0.5, params={"command_name": "base_velocity"})
     is_alive = RewTerm(func=mdp.is_alive, weight=3.0)
     stand_still = RewTerm(func=mdp.stand_still, weight=-0.3, params={"command_name": "base_velocity", "offset": 4.0})
 
@@ -874,7 +885,7 @@ class G1Rewards:
             **_STAGE_REWARD_V1_COMMON_PARAMS,
             "enable_prelanding_reward": True,
             "w_pre_v": 0.0,
-            "w_pre_a": 0.04,
+            "w_pre_a": 0.06,
             "enable_landing_event_penalty": False,
             "w_land_F": 0.0,
             "w_land_dF": 0.0,
@@ -897,7 +908,7 @@ class G1Rewards:
             "w_land_dF": 0.0,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": True,
-            "w_cop": 0.24,
+            "w_cop": 0.25,
             "w_area": 0.0,
         },
     )
@@ -915,7 +926,7 @@ class G1Rewards:
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": True,
             "w_cop": 0.0,
-            "w_area": 0.20,
+            "w_area": 0.22,
         },
     )
     stage_stance_delta_cop_v1 = RewTerm(
@@ -947,7 +958,7 @@ class G1Rewards:
             "w_pre_v": 0.0,
             "w_pre_a": 0.0,
             "enable_landing_event_penalty": True,
-            "w_land_F": 0.24,
+            "w_land_F": 0.30,
             "w_land_dF": 0.0,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": False,
@@ -1037,9 +1048,128 @@ class G1Rewards:
     )
 
 
+_G1_REWARD_TEMPLATE = G1Rewards()
+
+
+_DENSE_REWARD_TERM_NAMES = (
+    "track_lin_vel_xy_exp",
+    "track_ang_vel_z_exp",
+    "heading_error",
+    "is_alive",
+    "joint_deviation_hip",
+    "ang_vel_xy_l2",
+    "dof_torques_l2",
+    "dof_acc_l2",
+    "dof_vel_l2",
+    "action_rate_l2",
+    "flat_orientation_l2",
+    "pelvis_orientation_l2",
+    "feet_flat_ori",
+    "stage_swing_clearance_v1",
+    "stage_stance_cop_v1",
+    "stage_stance_area_v1",
+    "stage_stance_delta_cop_v1",
+    "energy",
+    "freeze_upper_body",
+)
+
+_SPARSE_REWARD_TERM_NAMES = (
+    "dont_wait",
+    "target_reached",
+    "stand_still",
+    "volume_points_penetration",
+    "feet_air_time",
+    "feet_slide",
+    "feet_at_plane",
+    "feet_close_xy",
+    "stage_pre_v_v1",
+    "stage_pre_a_v1",
+    "stage_landing_f_v1",
+    "stage_landing_df_v1",
+    "stage_landing_rho_v1",
+    "dof_pos_limits",
+    "dof_vel_limits",
+    "torque_limits",
+    "undesired_contacts",
+)
+
+
+def _reward_term_names(group_cfg_cls: type) -> set[str]:
+    group_cfg = group_cfg_cls()
+    return {name for name, value in vars(group_cfg).items() if isinstance(value, RewTerm)}
+
+
+def _validate_dense_sparse_reward_partition() -> None:
+    all_terms = _reward_term_names(G1Rewards)
+    dense_terms = set(_DENSE_REWARD_TERM_NAMES)
+    sparse_terms = set(_SPARSE_REWARD_TERM_NAMES)
+
+    overlap = dense_terms & sparse_terms
+    missing = all_terms - (dense_terms | sparse_terms)
+    unknown = (dense_terms | sparse_terms) - all_terms
+    if overlap or missing or unknown:
+        raise ValueError(
+            "Invalid dense/sparse reward partition for dual-critic parkour setup. "
+            f"overlap={sorted(overlap)}, missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+
+
+_validate_dense_sparse_reward_partition()
+
+
+@configclass
+class DenseRewardGroupCfg:
+    track_lin_vel_xy_exp = copy.deepcopy(_G1_REWARD_TEMPLATE.track_lin_vel_xy_exp)
+    track_ang_vel_z_exp = copy.deepcopy(_G1_REWARD_TEMPLATE.track_ang_vel_z_exp)
+    heading_error = copy.deepcopy(_G1_REWARD_TEMPLATE.heading_error)
+    is_alive = copy.deepcopy(_G1_REWARD_TEMPLATE.is_alive)
+    joint_deviation_hip = copy.deepcopy(_G1_REWARD_TEMPLATE.joint_deviation_hip)
+    ang_vel_xy_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.ang_vel_xy_l2)
+    dof_torques_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.dof_torques_l2)
+    dof_acc_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.dof_acc_l2)
+    dof_vel_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.dof_vel_l2)
+    action_rate_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.action_rate_l2)
+    flat_orientation_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.flat_orientation_l2)
+    pelvis_orientation_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.pelvis_orientation_l2)
+    feet_flat_ori = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_flat_ori)
+    stage_swing_clearance_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_swing_clearance_v1)
+    stage_stance_cop_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_cop_v1)
+    stage_stance_area_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_area_v1)
+    stage_stance_delta_cop_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_delta_cop_v1)
+    energy = copy.deepcopy(_G1_REWARD_TEMPLATE.energy)
+    freeze_upper_body = copy.deepcopy(_G1_REWARD_TEMPLATE.freeze_upper_body)
+
+
+@configclass
+class SparseRewardGroupCfg:
+    dont_wait = copy.deepcopy(_G1_REWARD_TEMPLATE.dont_wait)
+    target_reached = copy.deepcopy(_G1_REWARD_TEMPLATE.target_reached)
+    stand_still = copy.deepcopy(_G1_REWARD_TEMPLATE.stand_still)
+    volume_points_penetration = copy.deepcopy(_G1_REWARD_TEMPLATE.volume_points_penetration)
+    feet_air_time = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_air_time)
+    feet_slide = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_slide)
+    feet_at_plane = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_at_plane)
+    feet_close_xy = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_close_xy)
+    stage_pre_v_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_pre_v_v1)
+    stage_pre_a_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_pre_a_v1)
+    stage_landing_f_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_landing_f_v1)
+    stage_landing_df_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_landing_df_v1)
+    stage_landing_rho_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_landing_rho_v1)
+    dof_pos_limits = copy.deepcopy(_G1_REWARD_TEMPLATE.dof_pos_limits)
+    dof_vel_limits = copy.deepcopy(_G1_REWARD_TEMPLATE.dof_vel_limits)
+    torque_limits = copy.deepcopy(_G1_REWARD_TEMPLATE.torque_limits)
+    undesired_contacts = copy.deepcopy(_G1_REWARD_TEMPLATE.undesired_contacts)
+
+
 @configclass
 class RewardsCfg(MultiRewardCfg):
     rewards: G1Rewards = G1Rewards()
+
+
+@configclass
+class DualCriticRewardsCfg(MultiRewardCfg):
+    dense: DenseRewardGroupCfg = DenseRewardGroupCfg()
+    sparse: SparseRewardGroupCfg = SparseRewardGroupCfg()
 
 
 @configclass

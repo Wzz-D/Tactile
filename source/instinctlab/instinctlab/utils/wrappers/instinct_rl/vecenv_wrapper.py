@@ -263,14 +263,23 @@ class InstinctRlVecEnvWrapper(VecEnv):
             return {}
 
         latest = torch.nan_to_num(latest, nan=0.0, posinf=0.0, neginf=0.0)
-        feature_names = (
-            "contact_area_ratio",
-            "F_over_body_weight",
-            "cop_x_norm",
-            "cop_y_norm",
-            "vz_norm",
-        )
-        if latest.shape[-1] != len(feature_names):
+        feature_names_by_dim = {
+            4: (
+                "contact_area_ratio",
+                "F_over_body_weight",
+                "cop_x_norm",
+                "cop_y_norm",
+            ),
+            5: (
+                "contact_area_ratio",
+                "F_over_body_weight",
+                "cop_x_norm",
+                "cop_y_norm",
+                "vz_norm",
+            ),
+        }
+        feature_names = feature_names_by_dim.get(int(latest.shape[-1]), None)
+        if feature_names is None:
             return {}
 
         stats = {}
@@ -451,25 +460,27 @@ class InstinctRlVecEnvWrapper(VecEnv):
             stats[f"ContactStage/{metric_name}_right_mean"] = values[:, 1].mean()
 
     def _extract_latest_foot_contact_frame(self, term: torch.Tensor) -> torch.Tensor | None:
-        """Return latest frame as (num_envs, num_feet, 5) from possible term layouts."""
+        """Return latest frame as (num_envs, num_feet, feature_dim) from possible term layouts."""
         num_feet = self._get_foot_contact_num_feet()
-        feature_dim = 5
 
         if term.ndim == 2:
-            if term.shape[1] % feature_dim != 0 or num_feet <= 0:
+            if num_feet <= 0:
                 return None
-            if term.shape[1] % (num_feet * feature_dim) != 0:
-                return None
-            history_length = term.shape[1] // (num_feet * feature_dim)
-            reshaped = term.reshape(term.shape[0], history_length, num_feet, feature_dim)
-            return reshaped[:, -1, :, :]
+            for feature_dim in (4, 5):
+                if term.shape[1] % feature_dim != 0:
+                    continue
+                if term.shape[1] % (num_feet * feature_dim) != 0:
+                    continue
+                history_length = term.shape[1] // (num_feet * feature_dim)
+                reshaped = term.reshape(term.shape[0], history_length, num_feet, feature_dim)
+                return reshaped[:, -1, :, :]
 
-        if term.ndim == 3 and term.shape[-1] == feature_dim:
-            # (N, num_feet, 5)
+        if term.ndim == 3 and term.shape[-1] in (4, 5):
+            # (N, num_feet, feature_dim)
             return term
 
-        if term.ndim == 4 and term.shape[-1] == feature_dim:
-            # (N, history, num_feet, 5)
+        if term.ndim == 4 and term.shape[-1] in (4, 5):
+            # (N, history, num_feet, feature_dim)
             return term[:, -1, :, :]
 
         return None

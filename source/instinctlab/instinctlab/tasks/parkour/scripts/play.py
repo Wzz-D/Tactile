@@ -175,14 +175,15 @@ def _print_foot_contact_obs_sample(obs: torch.Tensor, env, env_id: int = 0) -> N
     env_id = max(0, min(env_id, env.num_envs - 1))
     term_slice, term_shape = get_obs_slice(obs_segments, "foot_contact_state")
     term_flat = obs[env_id, term_slice].detach().cpu()
-    if term_flat.numel() % 5 != 0:
+    feature_dim = 5 if term_flat.numel() % 5 == 0 else (4 if term_flat.numel() % 4 == 0 else 0)
+    if feature_dim == 0:
         print(
             f"[ObsDebug] unexpected 'foot_contact_state' flattened size={term_flat.numel()}, "
             f"shape_meta={term_shape}"
         )
         return
 
-    foot_tensor = term_flat.view(-1, 5)
+    foot_tensor = term_flat.view(-1, feature_dim)
     foot_names = []
     if "contact_stage_filter" in env.unwrapped.scene.sensors:
         foot_names = list(env.unwrapped.scene.sensors["contact_stage_filter"].body_names)
@@ -195,11 +196,18 @@ def _print_foot_contact_obs_sample(obs: torch.Tensor, env, env_id: int = 0) -> N
     )
     for foot_id in range(foot_tensor.shape[0]):
         foot_name = foot_names[foot_id] if foot_id < len(foot_names) else f"foot_{foot_id}"
-        area, f_over_bw, cop_x, cop_y, vz = foot_tensor[foot_id].tolist()
-        print(
-            f"[ObsDebug env={env_id} {foot_name}] "
-            f"area={area:.4f}, F/BW={f_over_bw:.4f}, COPnorm=({cop_x:.4f},{cop_y:.4f}), vz_norm={vz:.4f}"
-        )
+        if feature_dim == 5:
+            area, f_over_bw, cop_x, cop_y, vz = foot_tensor[foot_id].tolist()
+            print(
+                f"[ObsDebug env={env_id} {foot_name}] "
+                f"area={area:.4f}, F/BW={f_over_bw:.4f}, COPnorm=({cop_x:.4f},{cop_y:.4f}), vz_norm={vz:.4f}"
+            )
+        else:
+            area, f_over_bw, cop_x, cop_y = foot_tensor[foot_id].tolist()
+            print(
+                f"[ObsDebug env={env_id} {foot_name}] "
+                f"area={area:.4f}, F/BW={f_over_bw:.4f}, COPnorm=({cop_x:.4f},{cop_y:.4f})"
+            )
 
 
 def _print_stage_debug_sample(env, timestep: int, env_id: int, stage_reward_debug_term: object | None) -> None:

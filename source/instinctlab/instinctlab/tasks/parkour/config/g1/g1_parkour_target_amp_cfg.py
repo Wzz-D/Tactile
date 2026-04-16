@@ -15,7 +15,7 @@ from instinctlab.assets.unitree_g1 import (
 from instinctlab.motion_reference import MotionReferenceManagerCfg
 from instinctlab.motion_reference.motion_files.amass_motion_cfg import AmassMotionCfg as AmassMotionCfgBase
 from instinctlab.motion_reference.utils import motion_interpolate_bilinear
-from instinctlab.tasks.parkour.config.parkour_env_cfg import ROUGH_TERRAINS_CFG, ParkourEnvCfg
+from instinctlab.tasks.parkour.config.parkour_env_cfg import DualCriticRewardsCfg, ROUGH_TERRAINS_CFG, ParkourEnvCfg
 
 from instinctlab.sensors.contact_stage import ContactStageCfg
 from instinctlab.sensors.foot_tactile import FootTactileCfg, FootTactileDiffusionCfg, FootTactileNoiseCfg
@@ -104,7 +104,10 @@ class ShoeConfigMixin:
         self.scene.robot = G1_with_shoe_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.leg_volume_points.points_generator.z_min = -0.063
         self.scene.leg_volume_points.points_generator.z_max = -0.023
-        self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
+        if hasattr(self.rewards, "rewards") and getattr(self.rewards.rewards, "feet_at_plane", None) is not None:
+            self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
+        if hasattr(self.rewards, "sparse") and getattr(self.rewards.sparse, "feet_at_plane", None) is not None:
+            self.rewards.sparse.feet_at_plane.params["height_offset"] = 0.058
         # foot tactile sensor config
         self.scene.foot_tactile = FootTactileCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
@@ -204,6 +207,22 @@ class G1ParkourEnvCfg_PLAY(G1ParkourRoughEnvCfg_PLAY, ShoeConfigMixin):
     def __post_init__(self):
         super().__post_init__()
         self.apply_shoe_config()
+
+
+@configclass
+class G1ParkourDualCriticEnvCfg(G1ParkourEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards = DualCriticRewardsCfg()
+        self.rewards.sparse.feet_at_plane.params["height_offset"] = 0.058
+
+
+@configclass
+class G1ParkourDualCriticEnvCfg_PLAY(G1ParkourEnvCfg_PLAY):
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards = DualCriticRewardsCfg()
+        self.rewards.sparse.feet_at_plane.params["height_offset"] = 0.058
 
 
 @configclass

@@ -275,6 +275,57 @@ def foot_contact_state(
     return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def foot_contact_state_actor(
+    env: "ManagerBasedEnv",
+    stage_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_stage_filter"),
+    tactile_sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_tactile"),
+) -> torch.Tensor:
+    """Per-foot low-dimensional contact state for actor observations.
+
+    Per-foot feature order (4 dims):
+    [contact_area_ratio, F_over_body_weight, cop_x_norm, cop_y_norm]
+
+    Vz is intentionally excluded for better sim-to-real compatibility.
+    """
+    obs = foot_contact_state(
+        env,
+        stage_sensor_cfg=stage_sensor_cfg,
+        tactile_sensor_cfg=tactile_sensor_cfg,
+    )
+    return obs[..., :4]
+
+
+def stage_one_hot_state(
+    env: "ManagerBasedEnv",
+    stage_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_stage_filter"),
+) -> torch.Tensor:
+    """Per-foot one-hot stage state for critic observations.
+
+    Per-foot feature order (4 dims):
+    [E_sw, E_pre, E_land, E_st]
+    """
+    try:
+        stage_sensor = env.scene.sensors[stage_sensor_cfg.name]
+    except KeyError:
+        stage_sensor = None
+
+    num_envs = int(getattr(env, "num_envs", 0))
+    num_feet = int(getattr(stage_sensor, "num_bodies", 2)) if stage_sensor is not None else 2
+    if stage_sensor is None or num_envs <= 0 or num_feet <= 0:
+        return torch.zeros((max(num_envs, 0), max(num_feet, 0), 4), device=env.device, dtype=torch.float32)
+
+    stage_eligibility = torch.nan_to_num(
+        stage_sensor.data.stage_eligibility[:, :num_feet, :4],
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+    if stage_eligibility.shape[-1] < 4:
+        padded = torch.zeros((num_envs, num_feet, 4), device=env.device, dtype=torch.float32)
+        padded[..., : stage_eligibility.shape[-1]] = stage_eligibility
+        stage_eligibility = padded
+    return stage_eligibility
+
 
 def _debug_visualize_image(
     image: torch.Tensor,
