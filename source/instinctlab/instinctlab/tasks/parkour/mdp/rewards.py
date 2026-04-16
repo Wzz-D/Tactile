@@ -938,6 +938,25 @@ def stand_still(
     )
 
 
+def target_reached(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    target_dist_threshold: Optional[float] = None,
+) -> torch.Tensor:
+    """Reward reaching the sampled target position in xy using the same thresholding logic as the command term."""
+    command_term = env.command_manager.get_term(command_name)
+    if not hasattr(command_term, "pos_command_w") or not hasattr(command_term, "robot"):
+        return _zero_reward(env)
+
+    target_vec = command_term.pos_command_w - command_term.robot.data.root_pos_w[:, :3]
+    target_dist = torch.norm(target_vec[:, :2], dim=1)
+
+    if target_dist_threshold is None:
+        target_dist_threshold = float(getattr(command_term.cfg, "target_dis_threshold", 0.2))
+
+    return (target_dist <= target_dist_threshold).float()
+
+
 def feet_close_xy_gauss(
     env: ManagerBasedRLEnv, threshold: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), std: float = 0.1
 ) -> torch.Tensor:

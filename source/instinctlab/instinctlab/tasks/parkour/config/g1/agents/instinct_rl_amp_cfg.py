@@ -73,6 +73,11 @@ class AmpAlgoCfg(InstinctRlPpoAlgorithmCfg):
 
 
 @configclass
+class DualCriticAmpAlgoCfg(AmpAlgoCfg):
+    advantage_mixing_weights = [0.7, 0.3]
+
+
+@configclass
 class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
@@ -83,3 +88,9 @@ class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     empirical_normalization = False
     policy = MoEPolicyCfg()
     algorithm = AmpAlgoCfg()
+
+
+@configclass
+class G1ParkourDualCriticPPORunnerCfg(G1ParkourPPORunnerCfg):
+    run_name = "dualcritic_dense_sparse"
+    algorithm = DualCriticAmpAlgoCfg()
