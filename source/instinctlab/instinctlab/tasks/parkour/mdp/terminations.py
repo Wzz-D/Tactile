@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -49,3 +49,26 @@ def root_height_below_env_origin_minimum(
     asset: RigidObject = env.scene[asset_cfg.name]
     terrain_base_height = torch.clamp(env.scene.env_origins[:, 2], max=0.0)
     return asset.data.root_pos_w[:, 2] - terrain_base_height < minimum_height
+
+
+def reached_target_termination(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    target_dist_threshold: Optional[float] = None,
+) -> torch.Tensor:
+    """Terminate when the robot reaches the sampled target in xy.
+
+    This reuses the same target-distance semantics as the Parkour reward term, but returns a boolean
+    termination mask instead of a reward scalar.
+    """
+    command_term = env.command_manager.get_term(command_name)
+    if not hasattr(command_term, "pos_command_w") or not hasattr(command_term, "robot"):
+        return torch.zeros((env.num_envs,), device=env.device, dtype=torch.bool)
+
+    target_vec = command_term.pos_command_w - command_term.robot.data.root_pos_w[:, :3]
+    target_dist = torch.norm(target_vec[:, :2], dim=1)
+
+    if target_dist_threshold is None:
+        target_dist_threshold = float(getattr(command_term.cfg, "target_dis_threshold", 0.2))
+
+    return target_dist <= target_dist_threshold

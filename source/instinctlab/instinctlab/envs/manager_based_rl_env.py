@@ -53,6 +53,14 @@ class InstinctRlEnv(ManagerBasedRLEnv):
         print("[INFO] Monitor Manager: ", self.monitor_manager)
         self._log_sensor_binding_check()
 
+    def configure_eval_pre_reset_snapshot(self, enabled: bool = True) -> None:
+        """Enable raw pre-reset snapshots used by play.py eval mode.
+
+        These snapshots are cloned before env resets so terminal-step sensor values remain available
+        to downstream evaluation code.
+        """
+        self._enable_eval_pre_reset_snapshot = bool(enabled)
+
     def setup_manager_visualizers(self):
         super().setup_manager_visualizers()
         self.manager_visualizers["monitor_manager"] = ManagerLiveVisualizer(manager=self.monitor_manager)
@@ -83,7 +91,12 @@ class InstinctRlEnv(ManagerBasedRLEnv):
         self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
 
         self.extras["step"] = self.extras.get("step", {})
-        self.extras["step"].update(self._collect_pre_reset_sensor_snapshot())
+        if bool(getattr(self.cfg, "enable_pre_reset_sensor_snapshot_stats", True)):
+            self.extras["step"].update(self._collect_pre_reset_sensor_snapshot())
+        if bool(getattr(self, "_enable_eval_pre_reset_snapshot", False)):
+            self.extras["eval_pre_reset"] = self._collect_eval_pre_reset_snapshot()
+        else:
+            self.extras.pop("eval_pre_reset", None)
 
         if len(self.recorder_manager.active_terms) > 0:
             self.obs_buf = self.observation_manager.compute()
@@ -242,6 +255,51 @@ class InstinctRlEnv(ManagerBasedRLEnv):
                             stats["PreReset/StageInput/direct_minus_stage_area_abs_mean"] = delta_area.abs().mean()
 
         return stats
+
+    def _collect_eval_pre_reset_snapshot(self) -> dict[str, torch.Tensor]:
+        """Collect raw per-env tensors before env reset for eval-only consumers."""
+        snapshot: dict[str, torch.Tensor] = {
+            "done": self.reset_buf.detach().clone(),
+            "terminated": self.reset_terminated.detach().clone(),
+            "time_outs": self.reset_time_outs.detach().clone(),
+        }
+
+        termination_manager = getattr(self, "termination_manager", None)
+        if termination_manager is not None:
+            for term_name in ("target_reached",):
+                try:
+                    snapshot[f"termination/{term_name}"] = termination_manager.get_term(term_name).detach().clone()
+                except Exception:
+                    continue
+
+        stage_sensor = self.scene.sensors.get("contact_stage_filter", None)
+        if stage_sensor is not None:
+            stage_data = stage_sensor.data
+            snapshot["contact_stage/dominant_stage_id"] = stage_data.dominant_stage_id.detach().clone()
+            snapshot["contact_stage/foot_vz"] = stage_data.foot_vz.detach().clone()
+            snapshot["contact_stage/total_force"] = stage_data.total_force.detach().clone()
+            snapshot["contact_stage/contact_area"] = stage_data.contact_area.detach().clone()
+            snapshot["contact_stage/landing_window_active"] = (stage_data.landing_window > 0).detach().clone()
+
+        tactile_sensor = self.scene.sensors.get("foot_tactile", None)
+        if tactile_sensor is not None:
+            tactile_data = tactile_sensor.data
+            snapshot["foot_tactile/cop_b"] = tactile_data.cop_b.detach().clone()
+            snapshot["foot_tactile/contact_area_ratio"] = tactile_data.contact_area_ratio.detach().clone()
+
+        volume_sensor = self.scene.sensors.get("leg_volume_points", None)
+        if volume_sensor is not None:
+            penetration_offset = getattr(volume_sensor.data, "penetration_offset", None)
+            if torch.is_tensor(penetration_offset) and penetration_offset.numel() > 0:
+                penetration_depth = torch.norm(penetration_offset, dim=-1)
+                penetration_depth = penetration_depth.flatten(1, -1)
+                snapshot["volume_points/max_penetration_depth"] = penetration_depth.max(dim=1).values.detach().clone()
+            else:
+                snapshot["volume_points/max_penetration_depth"] = torch.zeros(
+                    self.num_envs, device=self.device, dtype=torch.float32
+                )
+
+        return snapshot
 
     def _append_metric_mean_var(self, stats: dict[str, torch.Tensor], values, prefix: str) -> None:
         if not torch.is_tensor(values) or values.numel() == 0:

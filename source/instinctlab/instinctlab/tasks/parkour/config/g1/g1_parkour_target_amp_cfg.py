@@ -131,10 +131,10 @@ class ShoeConfigMixin:
                 preserve_total_force_after_diffusion=True,
             ),
             noise_cfg=FootTactileNoiseCfg(
-                enable=False,
+                enable=True,
                 force_relative_error_max=0.08,
-                delay_prob=0.0,
-                max_delay_frames=2,
+                delay_prob=0.05,
+                max_delay_frames=1,
             ),
             update_period=0.02,
             debug_vis=False,
@@ -143,6 +143,7 @@ class ShoeConfigMixin:
             prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
             update_period=0.02,
             debug_vis=False,
+            enable_self_check=False,
         )
         self.events.bind_foot_tactile = EventTerm(
             func=mdp.bind_foot_tactile,

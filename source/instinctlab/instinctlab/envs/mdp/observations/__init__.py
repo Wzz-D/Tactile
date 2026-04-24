@@ -5,3 +5,4 @@ from .exteroception import *
 from .motion_reference import *
 from .reference_as_state import *
 from .reference_masked_proprioception import *
+from .amp_ankle_curriculum import *
