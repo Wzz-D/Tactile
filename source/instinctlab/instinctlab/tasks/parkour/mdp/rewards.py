@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import torch
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import ContactSensor
@@ -89,6 +89,23 @@ def _signed_distance_to_polygon(points_xy: torch.Tensor, polygon_xy: torch.Tenso
     unsigned = _distance_point_to_polygon_boundary(points_xy, polygon_xy)
     inside = _point_in_polygon_even_odd(points_xy, polygon_xy)
     return torch.where(inside, unsigned, -unsigned)
+
+
+def _normalize_signature_value(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_signature_value(item) for item in value)
+    return value
+
+
+def _scene_entity_signature(cfg: Optional[SceneEntityCfg]) -> Any:
+    if cfg is None:
+        return None
+    return (
+        getattr(cfg, "name", None),
+        _normalize_signature_value(getattr(cfg, "body_names", None)),
+        _normalize_signature_value(getattr(cfg, "joint_names", None)),
+        bool(getattr(cfg, "preserve_order", False)),
+    )
 
 
 class foot_cop_margin(ManagerTermBase):
@@ -289,28 +306,32 @@ class foot_cop_smoothness(ManagerTermBase):
         return reward
 
 
-class contact_stage_reward_v1(ManagerTermBase):
-    """Stage-aware reward V1: PreLanding + contact-phase dense terms + Landing event penalty."""
-
+class _ContactStageRewardV1SharedCore:
     SWING_STAGE_ID = 0
     PRE_STAGE_ID = 1
     LANDING_STAGE_ID = 2
     STANCE_STAGE_ID = 3
 
-    def __init__(self, cfg: "RewardTermCfg", env: "ManagerBasedRLEnv"):
-        super().__init__(cfg, env)
-        self._stage_sensor_cfg = cfg.params.get("stage_sensor_cfg", SceneEntityCfg("contact_stage_filter"))
-        self._tactile_sensor_cfg = cfg.params.get("tactile_sensor_cfg", SceneEntityCfg("foot_tactile"))
-        self._asset_cfg = cfg.params.get("asset_cfg", SceneEntityCfg("robot"))
+    def __init__(
+        self,
+        env: "ManagerBasedRLEnv",
+        stage_sensor_cfg: SceneEntityCfg,
+        tactile_sensor_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg,
+        num_feet: int = 2,
+    ):
+        self._env = env
+        self._stage_sensor_cfg = stage_sensor_cfg
+        self._tactile_sensor_cfg = tactile_sensor_cfg
+        self._asset_cfg = asset_cfg
 
         self._stage_sensor = None
         self._tactile_sensor = None
 
-        self._num_feet = int(cfg.params.get("num_feet", 2))
+        self._num_feet = int(num_feet)
         self._tactile_body_ids_for_stage = list(range(self._num_feet))
 
         self._body_weight_newton = None
-
         self._sensor_available = False
         self._body_has_polygon = torch.zeros(self._num_feet, device=env.device, dtype=torch.bool)
         self._body_polygons: list[Optional[torch.Tensor]] = [None for _ in range(self._num_feet)]
@@ -326,37 +347,33 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._landing_dF_peak = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
         self._landing_rho_peak_max = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
 
-        self._debug_alpha_sw = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_alpha_pre = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_alpha_land = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_alpha_st = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_sw_h = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_pre_v = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_pre_a = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_st_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_st_area = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_st_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_delta_cop = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_contact_base = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_contact_phase_weight = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_r_contact = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_landing_event_penalty = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_vz = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_az = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_cop_margin = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_contact_area_ratio = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_rho_peak = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_landing_window = torch.zeros((env.num_envs, self._num_feet), device=env.device, dtype=torch.float32)
-        self._debug_enable_land = 0.0
-        self._debug_enable_st = 0.0
-        self._debug_gamma_land = 0.0
-        self._debug_gamma_st = 0.0
+        self._debug_buffers_enabled = False
+        self._debug_alpha_sw: Optional[torch.Tensor] = None
+        self._debug_alpha_pre: Optional[torch.Tensor] = None
+        self._debug_alpha_land: Optional[torch.Tensor] = None
+        self._debug_alpha_st: Optional[torch.Tensor] = None
+        self._debug_r_sw_h: Optional[torch.Tensor] = None
+        self._debug_r_pre_v: Optional[torch.Tensor] = None
+        self._debug_r_pre_a: Optional[torch.Tensor] = None
+        self._debug_r_st_cop: Optional[torch.Tensor] = None
+        self._debug_r_st_area: Optional[torch.Tensor] = None
+        self._debug_r_st_delta_cop: Optional[torch.Tensor] = None
+        self._debug_delta_cop: Optional[torch.Tensor] = None
+        self._debug_vz: Optional[torch.Tensor] = None
+        self._debug_az: Optional[torch.Tensor] = None
+        self._debug_cop_margin: Optional[torch.Tensor] = None
+        self._debug_contact_area_ratio: Optional[torch.Tensor] = None
+        self._debug_rho_peak: Optional[torch.Tensor] = None
+        self._debug_landing_window: Optional[torch.Tensor] = None
+
+        self._last_metrics: Optional[dict[str, torch.Tensor]] = None
+        self._last_compute_step: Optional[int] = None
 
         self._resolve_sensor_handles(env)
         self._sync_num_feet_from_stage_sensor()
+        self._resize_buffers(self._num_feet)
         self._build_stage_to_tactile_index()
         self._build_outline_cache()
-        self._resize_buffers(self._num_feet)
 
     def _resolve_sensor_handles(self, env: "ManagerBasedRLEnv") -> None:
         try:
@@ -388,31 +405,38 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._landing_F_peak = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._landing_dF_peak = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._landing_rho_peak_max = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-
-        self._debug_alpha_sw = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_alpha_pre = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_alpha_land = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_alpha_st = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_sw_h = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_pre_v = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_pre_a = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_st_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_st_area = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_st_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_delta_cop = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_contact_base = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_contact_phase_weight = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_r_contact = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_landing_event_penalty = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_vz = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_az = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_cop_margin = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_contact_area_ratio = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_rho_peak = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
-        self._debug_landing_window = torch.zeros((self._env.num_envs, num_feet), device=self._env.device, dtype=torch.float32)
         self._body_has_polygon = torch.zeros(num_feet, device=self._env.device, dtype=torch.bool)
         self._body_polygons = [None for _ in range(num_feet)]
         self._tactile_body_ids_for_stage = list(range(num_feet))
+        if self._debug_buffers_enabled:
+            self._allocate_debug_buffers(num_feet)
+
+    def _allocate_debug_buffers(self, num_feet: int) -> None:
+        device = self._env.device
+        num_envs = self._env.num_envs
+        self._debug_alpha_sw = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_alpha_pre = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_alpha_land = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_alpha_st = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_sw_h = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_pre_v = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_pre_a = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_st_cop = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_st_area = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_r_st_delta_cop = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_delta_cop = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_vz = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_az = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_cop_margin = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_contact_area_ratio = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_rho_peak = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+        self._debug_landing_window = torch.zeros((num_envs, num_feet), device=device, dtype=torch.float32)
+
+    def _enable_debug_buffers(self) -> None:
+        if self._debug_buffers_enabled:
+            return
+        self._debug_buffers_enabled = True
+        self._allocate_debug_buffers(self._num_feet)
 
     def _build_stage_to_tactile_index(self) -> None:
         self._tactile_body_ids_for_stage = list(range(self._num_feet))
@@ -491,12 +515,12 @@ class contact_stage_reward_v1(ManagerTermBase):
             margin[:, body_id] = _signed_distance_to_polygon(cop_b[:, body_id, :], polygon.to(cop_b.dtype))
         return margin
 
-    def _extract_tactile_aligned(self, tactile_data) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _extract_tactile_aligned(self, tactile_data) -> tuple[torch.Tensor, torch.Tensor]:
         num_tactile_bodies = int(tactile_data.cop_b.shape[1])
         if num_tactile_bodies <= 0:
             zeros_cop = torch.zeros((self._env.num_envs, self._num_feet, 2), device=self._env.device, dtype=torch.float32)
             zeros_area = torch.zeros((self._env.num_envs, self._num_feet), device=self._env.device, dtype=torch.float32)
-            return zeros_cop, zeros_area, zeros_area
+            return zeros_cop, zeros_area
 
         ids = self._tactile_body_ids_for_stage
         if len(ids) < self._num_feet:
@@ -504,25 +528,14 @@ class contact_stage_reward_v1(ManagerTermBase):
         ids = [int(min(max(body_id, 0), num_tactile_bodies - 1)) for body_id in ids[: self._num_feet]]
         while len(ids) < self._num_feet:
             ids.append(ids[-1] if ids else 0)
-        cop_b = torch.nan_to_num(
-            tactile_data.cop_b[:, ids, :],
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
+        cop_b = torch.nan_to_num(tactile_data.cop_b[:, ids, :], nan=0.0, posinf=0.0, neginf=0.0)
         area_ratio = torch.nan_to_num(
             tactile_data.contact_area_ratio[:, ids],
             nan=0.0,
             posinf=0.0,
             neginf=0.0,
         ).clamp(0.0, 1.0)
-        peak_force = torch.nan_to_num(
-            tactile_data.peak_force[:, ids],
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        ).clamp_min(0.0)
-        return cop_b, area_ratio, peak_force
+        return cop_b, area_ratio
 
     def _infer_body_weight_newton(self, env: "ManagerBasedRLEnv", fallback_body_weight: float) -> float:
         if self._body_weight_newton is not None and self._body_weight_newton > 1e-6:
@@ -558,112 +571,53 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._landing_F_peak[env_ids] = 0.0
         self._landing_dF_peak[env_ids] = 0.0
         self._landing_rho_peak_max[env_ids] = 0.0
-        self._debug_alpha_sw[env_ids] = 0.0
-        self._debug_alpha_pre[env_ids] = 0.0
-        self._debug_alpha_land[env_ids] = 0.0
-        self._debug_alpha_st[env_ids] = 0.0
-        self._debug_r_sw_h[env_ids] = 0.0
-        self._debug_r_pre_v[env_ids] = 0.0
-        self._debug_r_pre_a[env_ids] = 0.0
-        self._debug_r_st_cop[env_ids] = 0.0
-        self._debug_r_st_area[env_ids] = 0.0
-        self._debug_r_st_delta_cop[env_ids] = 0.0
-        self._debug_delta_cop[env_ids] = 0.0
-        self._debug_r_contact_base[env_ids] = 0.0
-        self._debug_contact_phase_weight[env_ids] = 0.0
-        self._debug_r_contact[env_ids] = 0.0
-        self._debug_landing_event_penalty[env_ids] = 0.0
-        self._debug_vz[env_ids] = 0.0
-        self._debug_az[env_ids] = 0.0
-        self._debug_cop_margin[env_ids] = 0.0
-        self._debug_contact_area_ratio[env_ids] = 0.0
-        self._debug_rho_peak[env_ids] = 0.0
-        self._debug_landing_window[env_ids] = 0.0
 
-    def get_debug_dict(self, env_id: int) -> dict[str, torch.Tensor]:
-        scalar_shape = (self._num_feet,)
-        return {
-            "alpha_sw": self._debug_alpha_sw[env_id].detach().clone(),
-            "alpha_pre": self._debug_alpha_pre[env_id].detach().clone(),
-            "alpha_land": self._debug_alpha_land[env_id].detach().clone(),
-            "alpha_st": self._debug_alpha_st[env_id].detach().clone(),
-            "r_sw_h": self._debug_r_sw_h[env_id].detach().clone(),
-            "r_pre_v": self._debug_r_pre_v[env_id].detach().clone(),
-            "r_pre_a": self._debug_r_pre_a[env_id].detach().clone(),
-            "r_st_cop": self._debug_r_st_cop[env_id].detach().clone(),
-            "r_st_area": self._debug_r_st_area[env_id].detach().clone(),
-            "r_st_delta_cop": self._debug_r_st_delta_cop[env_id].detach().clone(),
-            "delta_cop": self._debug_delta_cop[env_id].detach().clone(),
-            "r_cop": self._debug_r_st_cop[env_id].detach().clone(),
-            "r_area": self._debug_r_st_area[env_id].detach().clone(),
-            "r_contact_base": self._debug_r_contact_base[env_id].detach().clone(),
-            "contact_phase_weight": self._debug_contact_phase_weight[env_id].detach().clone(),
-            "r_contact": self._debug_r_contact[env_id].detach().clone(),
-            "landing_F_peak": self._landing_F_peak[env_id].detach().clone(),
-            "landing_dF_peak": self._landing_dF_peak[env_id].detach().clone(),
-            "landing_rho_peak_max": self._landing_rho_peak_max[env_id].detach().clone(),
-            "landing_event_penalty": self._debug_landing_event_penalty[env_id].detach().clone(),
-            "vz": self._debug_vz[env_id].detach().clone(),
-            "az": self._debug_az[env_id].detach().clone(),
-            "cop_margin": self._debug_cop_margin[env_id].detach().clone(),
-            "contact_area_ratio": self._debug_contact_area_ratio[env_id].detach().clone(),
-            "rho_peak": self._debug_rho_peak[env_id].detach().clone(),
-            "landing_window": self._debug_landing_window[env_id].detach().clone(),
-            "enable_land": torch.full(scalar_shape, self._debug_enable_land, device=self._env.device, dtype=torch.float32),
-            "enable_st": torch.full(scalar_shape, self._debug_enable_st, device=self._env.device, dtype=torch.float32),
-            "gamma_land": torch.full(scalar_shape, self._debug_gamma_land, device=self._env.device, dtype=torch.float32),
-            "gamma_st": torch.full(scalar_shape, self._debug_gamma_st, device=self._env.device, dtype=torch.float32),
-        }
+    def _store_last_metrics(self, metrics: dict[str, torch.Tensor], enable_debug_buffers: bool) -> None:
+        self._last_metrics = metrics
+        if enable_debug_buffers:
+            self._enable_debug_buffers()
+        if not self._debug_buffers_enabled:
+            return
+        assert self._debug_alpha_sw is not None
+        self._debug_alpha_sw.copy_(metrics["alpha_sw"])
+        self._debug_alpha_pre.copy_(metrics["alpha_pre"])
+        self._debug_alpha_land.copy_(metrics["alpha_land"])
+        self._debug_alpha_st.copy_(metrics["alpha_st"])
+        self._debug_r_sw_h.copy_(metrics["r_sw_h"])
+        self._debug_r_pre_v.copy_(metrics["r_pre_v"])
+        self._debug_r_pre_a.copy_(metrics["r_pre_a"])
+        self._debug_r_st_cop.copy_(metrics["r_cop"])
+        self._debug_r_st_area.copy_(metrics["r_area"])
+        self._debug_r_st_delta_cop.copy_(metrics["r_st_delta_cop"])
+        self._debug_delta_cop.copy_(metrics["delta_cop"])
+        self._debug_vz.copy_(metrics["vz"])
+        self._debug_az.copy_(metrics["az"])
+        self._debug_cop_margin.copy_(metrics["cop_margin"])
+        self._debug_contact_area_ratio.copy_(metrics["contact_area_ratio"])
+        self._debug_rho_peak.copy_(metrics["rho_peak"])
+        self._debug_landing_window.copy_(metrics["landing_window"])
 
-    def __call__(
+    def compute(
         self,
         env: "ManagerBasedRLEnv",
-        stage_sensor_cfg: Optional[SceneEntityCfg] = None,
-        tactile_sensor_cfg: Optional[SceneEntityCfg] = None,
-        asset_cfg: Optional[SceneEntityCfg] = None,
-        enable_stage_reward_v1: bool = True,
-        enable_swing_clearance_reward: bool = False,
-        w_swing_h: float = 0.08,
-        swing_h_ref: float = 0.07,
-        swing_command_name: str = "base_velocity",
-        swing_vel_threshold: float = 0.15,
-        enable_prelanding_reward: bool = True,
-        pre_vz_ref: float = 0.24,
-        pre_az_ref: float = 7.0,
-        pre_az_filter_alpha: float = 0.7,
-        w_pre_v: float = 0.22,
-        w_pre_a: float = 0.035,
-        enable_landing_event_penalty: bool = True,
-        w_land_F: float = 0.22,
-        w_land_dF: float = 0.10,
-        w_land_rho: float = 0.10,
-        land_dF_ref: float = 3500.0,
-        body_weight: float = 420.0,
-        enable_contact_quality_reward: bool = True,
-        enable_contact_quality_on_landing: bool = True,
-        enable_contact_quality_on_stance: bool = True,
-        gamma_land: float = 0.6,
-        gamma_st: float = 1.0,
-        cop_margin_max: float = 0.038,
-        w_cop: float = 0.24,
-        w_area: float = 0.18,
-        enable_stance_delta_cop_reward: bool = True,
-        w_st_delta_cop: float = 0.03,
-        delta_cop_ref: float = 0.01,
-        contact_quality_eps: float = 1e-6,
-        enable_stage_reward_warmup: bool = True,
-        stage_reward_warmup_steps: int = 10000,
-        enable_self_check: bool = True,
-    ) -> torch.Tensor:
-        if stage_sensor_cfg is not None:
-            self._stage_sensor_cfg = stage_sensor_cfg
-        if tactile_sensor_cfg is not None:
-            self._tactile_sensor_cfg = tactile_sensor_cfg
-        if asset_cfg is not None:
-            self._asset_cfg = asset_cfg
-
-        if not enable_stage_reward_v1:
-            return _zero_reward(env)
+        swing_command_name: str,
+        swing_vel_threshold: float,
+        swing_h_ref: float,
+        pre_vz_ref: float,
+        pre_az_ref: float,
+        pre_az_filter_alpha: float,
+        land_dF_ref: float,
+        body_weight: float,
+        cop_margin_max: float,
+        delta_cop_ref: float,
+        contact_quality_eps: float,
+        enable_debug_buffers: bool = False,
+    ) -> Optional[dict[str, torch.Tensor]]:
+        current_step = int(getattr(env, "common_step_counter", 0))
+        if self._last_compute_step == current_step:
+            if self._last_metrics is not None and enable_debug_buffers:
+                self._store_last_metrics(self._last_metrics, enable_debug_buffers=True)
+            return self._last_metrics
 
         self._resolve_sensor_handles(env)
         self._sync_num_feet_from_stage_sensor()
@@ -671,8 +625,10 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._build_stage_to_tactile_index()
         self._build_outline_cache()
 
+        self._last_compute_step = current_step
         if self._stage_sensor is None or self._tactile_sensor is None:
-            return _zero_reward(env)
+            self._last_metrics = None
+            return None
 
         stage_data = self._stage_sensor.data
         tactile_data = self._tactile_sensor.data
@@ -712,8 +668,7 @@ class contact_stage_reward_v1(ManagerTermBase):
         r_sw_h = torch.nan_to_num(r_sw_h, nan=0.0, posinf=0.0, neginf=0.0)
 
         vz = torch.nan_to_num(stage_data.foot_vz, nan=0.0, posinf=0.0, neginf=0.0)
-        prev_vz = self._prev_vz
-        az_raw = (vz - prev_vz) / step_dt
+        az_raw = (vz - self._prev_vz) / step_dt
         az_raw = torch.where(self._az_initialized, az_raw, torch.zeros_like(az_raw))
         az_raw = torch.nan_to_num(az_raw, nan=0.0, posinf=0.0, neginf=0.0)
         az_alpha = float(min(max(pre_az_filter_alpha, 0.0), 1.0))
@@ -728,31 +683,13 @@ class contact_stage_reward_v1(ManagerTermBase):
         delta_a_down = torch.clamp(-az - float(pre_az_ref), min=0.0)
         r_pre_v = -torch.square(delta_v_down)
         r_pre_a = -torch.square(delta_a_down)
-        r_pre = float(w_pre_v) * r_pre_v + float(w_pre_a) * r_pre_a
-        r_pre = torch.nan_to_num(r_pre, nan=0.0, posinf=0.0, neginf=0.0)
 
-        cop_b, contact_area_ratio, _ = self._extract_tactile_aligned(tactile_data)
+        cop_b, contact_area_ratio = self._extract_tactile_aligned(tactile_data)
         cop_margin = self._compute_cop_margin(cop_b)
         contact_quality_eps = max(float(contact_quality_eps), 1e-12)
         cop_margin_max_value = max(float(cop_margin_max), contact_quality_eps)
         r_cop = torch.clamp(cop_margin / cop_margin_max_value, min=0.0, max=1.0)
         r_area = torch.clamp(contact_area_ratio, min=0.0, max=1.0)
-        r_contact_base = float(w_cop) * r_cop + float(w_area) * r_area
-        r_contact_base = torch.nan_to_num(r_contact_base, nan=0.0, posinf=0.0, neginf=0.0)
-
-        enable_land = 1.0 if bool(enable_contact_quality_on_landing) else 0.0
-        enable_st = 1.0 if bool(enable_contact_quality_on_stance) else 0.0
-        gamma_land = max(float(gamma_land), 0.0)
-        gamma_st = max(float(gamma_st), 0.0)
-        contact_phase_weight = (
-            enable_land * gamma_land * alpha_land
-            + enable_st * gamma_st * alpha_st
-        )
-        contact_phase_weight = torch.nan_to_num(contact_phase_weight, nan=0.0, posinf=0.0, neginf=0.0)
-        r_contact = contact_phase_weight * r_contact_base
-        r_contact = torch.nan_to_num(r_contact, nan=0.0, posinf=0.0, neginf=0.0)
-        if not enable_contact_quality_reward:
-            r_contact = torch.zeros_like(r_contact)
 
         contact_active = stage_data.contact_active
         delta_cop = torch.linalg.vector_norm(cop_b - self._prev_cop, dim=-1)
@@ -765,83 +702,293 @@ class contact_stage_reward_v1(ManagerTermBase):
         self._prev_cop = torch.where(contact_active.unsqueeze(-1), cop_b, self._prev_cop)
         self._cop_initialized = contact_active
 
-        R_stage = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-        if enable_swing_clearance_reward:
-            R_stage += (alpha_sw * float(w_swing_h) * r_sw_h).sum(dim=-1)
-        if enable_prelanding_reward:
-            R_stage += (alpha_pre * r_pre).sum(dim=-1)
-        R_stage += r_contact.sum(dim=-1)
-        if enable_stance_delta_cop_reward:
-            R_stage += (alpha_st * float(w_st_delta_cop) * r_st_delta_cop).sum(dim=-1)
+        total_force = torch.nan_to_num(stage_data.total_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        d_force = torch.nan_to_num(stage_data.dF, nan=0.0, posinf=0.0, neginf=0.0)
+        rho_peak = torch.nan_to_num(stage_data.rho_peak, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+        landing_window_active = stage_data.landing_window > 0
+        landing_start = landing_window_active & (~self._landing_active_prev)
+        d_force_pos = torch.clamp(d_force, min=0.0)
 
-        landing_event_penalty_per_foot = torch.zeros_like(alpha_pre)
-        R_landing_event = torch.zeros_like(R_stage)
-        if enable_landing_event_penalty:
-            total_force = torch.nan_to_num(stage_data.total_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-            d_force = torch.nan_to_num(stage_data.dF, nan=0.0, posinf=0.0, neginf=0.0)
-            rho_peak = torch.nan_to_num(stage_data.rho_peak, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-            landing_window_active = stage_data.landing_window > 0
+        self._landing_F_peak = torch.where(landing_start, total_force, self._landing_F_peak)
+        self._landing_dF_peak = torch.where(landing_start, d_force_pos, self._landing_dF_peak)
+        self._landing_rho_peak_max = torch.where(landing_start, rho_peak, self._landing_rho_peak_max)
 
-            landing_start = landing_window_active & (~self._landing_active_prev)
-            d_force_pos = torch.clamp(d_force, min=0.0)
+        self._landing_F_peak = torch.where(
+            landing_window_active,
+            torch.maximum(self._landing_F_peak, total_force),
+            self._landing_F_peak,
+        )
+        self._landing_dF_peak = torch.where(
+            landing_window_active,
+            torch.maximum(self._landing_dF_peak, d_force_pos),
+            self._landing_dF_peak,
+        )
+        self._landing_rho_peak_max = torch.where(
+            landing_window_active,
+            torch.maximum(self._landing_rho_peak_max, rho_peak),
+            self._landing_rho_peak_max,
+        )
 
-            self._landing_F_peak = torch.where(landing_start, total_force, self._landing_F_peak)
-            self._landing_dF_peak = torch.where(landing_start, d_force_pos, self._landing_dF_peak)
-            self._landing_rho_peak_max = torch.where(landing_start, rho_peak, self._landing_rho_peak_max)
+        landing_end = (~landing_window_active) & self._landing_active_prev
+        landing_F_peak_event = self._landing_F_peak
+        landing_dF_peak_event = self._landing_dF_peak
+        landing_rho_peak_event = self._landing_rho_peak_max
+        body_weight_n = self._infer_body_weight_newton(env, fallback_body_weight=float(body_weight))
+        landing_F_peak_norm = landing_F_peak_event / max(body_weight_n, eps)
+        landing_dF_peak_norm = landing_dF_peak_event / max(float(land_dF_ref), eps)
+        landing_force_norm_step = total_force / max(body_weight_n, eps)
+        landing_dF_norm_step = d_force_pos / max(float(land_dF_ref), eps)
 
-            self._landing_F_peak = torch.where(
-                landing_window_active,
-                torch.maximum(self._landing_F_peak, total_force),
-                self._landing_F_peak,
-            )
-            self._landing_dF_peak = torch.where(
-                landing_window_active,
-                torch.maximum(self._landing_dF_peak, d_force_pos),
-                self._landing_dF_peak,
-            )
-            self._landing_rho_peak_max = torch.where(
-                landing_window_active,
-                torch.maximum(self._landing_rho_peak_max, rho_peak),
-                self._landing_rho_peak_max,
-            )
+        clear_mask = ~landing_window_active
+        self._landing_F_peak = torch.where(clear_mask, torch.zeros_like(self._landing_F_peak), self._landing_F_peak)
+        self._landing_dF_peak = torch.where(clear_mask, torch.zeros_like(self._landing_dF_peak), self._landing_dF_peak)
+        self._landing_rho_peak_max = torch.where(
+            clear_mask,
+            torch.zeros_like(self._landing_rho_peak_max),
+            self._landing_rho_peak_max,
+        )
+        self._landing_active_prev = landing_window_active
 
-            landing_end = (~landing_window_active) & self._landing_active_prev
-            body_weight_n = self._infer_body_weight_newton(env, fallback_body_weight=float(body_weight))
-            F_peak_norm = self._landing_F_peak / max(body_weight_n, eps)
-            dF_peak_norm = self._landing_dF_peak / max(float(land_dF_ref), eps)
-            landing_penalty_raw = (
-                -float(w_land_F) * F_peak_norm
-                - float(w_land_dF) * dF_peak_norm
-                - float(w_land_rho) * self._landing_rho_peak_max
+        metrics = {
+            "alpha_sw": torch.nan_to_num(alpha_sw, nan=0.0, posinf=0.0, neginf=0.0),
+            "alpha_pre": torch.nan_to_num(alpha_pre, nan=0.0, posinf=0.0, neginf=0.0),
+            "alpha_land": torch.nan_to_num(alpha_land, nan=0.0, posinf=0.0, neginf=0.0),
+            "alpha_st": torch.nan_to_num(alpha_st, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_sw_h": torch.nan_to_num(r_sw_h, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_pre_v": torch.nan_to_num(r_pre_v, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_pre_a": torch.nan_to_num(r_pre_a, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_cop": torch.nan_to_num(r_cop, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_area": torch.nan_to_num(r_area, nan=0.0, posinf=0.0, neginf=0.0),
+            "r_st_delta_cop": torch.nan_to_num(r_st_delta_cop, nan=0.0, posinf=0.0, neginf=0.0),
+            "delta_cop": torch.nan_to_num(delta_cop, nan=0.0, posinf=0.0, neginf=0.0),
+            "vz": torch.nan_to_num(vz, nan=0.0, posinf=0.0, neginf=0.0),
+            "az": torch.nan_to_num(az, nan=0.0, posinf=0.0, neginf=0.0),
+            "cop_margin": torch.nan_to_num(cop_margin, nan=0.0, posinf=0.0, neginf=0.0),
+            "contact_area_ratio": torch.nan_to_num(contact_area_ratio, nan=0.0, posinf=0.0, neginf=0.0),
+            "rho_peak": rho_peak,
+            "landing_window": stage_data.landing_window.to(dtype=torch.float32),
+            "landing_event_mask": landing_end,
+            "landing_F_peak_norm": torch.nan_to_num(landing_F_peak_norm, nan=0.0, posinf=0.0, neginf=0.0),
+            "landing_dF_peak_norm": torch.nan_to_num(landing_dF_peak_norm, nan=0.0, posinf=0.0, neginf=0.0),
+            "landing_rho_peak_event": torch.nan_to_num(landing_rho_peak_event, nan=0.0, posinf=0.0, neginf=0.0),
+            "landing_force_norm_step": torch.nan_to_num(landing_force_norm_step, nan=0.0, posinf=0.0, neginf=0.0),
+            "landing_dF_norm_step": torch.nan_to_num(landing_dF_norm_step, nan=0.0, posinf=0.0, neginf=0.0),
+        }
+        self._store_last_metrics(metrics, enable_debug_buffers=enable_debug_buffers)
+        return metrics
+
+    def _get_metric_slice(
+        self,
+        name: str,
+        env_id: int,
+        default_shape: tuple[int, ...],
+        default_dtype: torch.dtype = torch.float32,
+        debug_name: Optional[str] = None,
+    ) -> torch.Tensor:
+        if self._debug_buffers_enabled:
+            debug_tensor = getattr(self, f"_debug_{debug_name or name}", None)
+            if torch.is_tensor(debug_tensor):
+                return debug_tensor[env_id].detach().clone()
+        if self._last_metrics is not None:
+            metric = self._last_metrics.get(name)
+            if torch.is_tensor(metric):
+                return metric[env_id].detach().clone()
+        return torch.zeros(default_shape, device=self._env.device, dtype=default_dtype)
+
+    def get_debug_dict(self, env_id: int, debug_context: dict[str, Any]) -> dict[str, torch.Tensor]:
+        env_id = int(max(0, min(env_id, self._env.num_envs - 1)))
+        scalar_shape = (self._num_feet,)
+
+        alpha_sw = self._get_metric_slice("alpha_sw", env_id, scalar_shape)
+        alpha_pre = self._get_metric_slice("alpha_pre", env_id, scalar_shape)
+        alpha_land = self._get_metric_slice("alpha_land", env_id, scalar_shape)
+        alpha_st = self._get_metric_slice("alpha_st", env_id, scalar_shape)
+        r_sw_h = self._get_metric_slice("r_sw_h", env_id, scalar_shape)
+        r_pre_v = self._get_metric_slice("r_pre_v", env_id, scalar_shape)
+        r_pre_a = self._get_metric_slice("r_pre_a", env_id, scalar_shape)
+        r_cop = self._get_metric_slice("r_cop", env_id, scalar_shape, debug_name="r_st_cop")
+        r_area = self._get_metric_slice("r_area", env_id, scalar_shape, debug_name="r_st_area")
+        r_st_delta_cop = self._get_metric_slice("r_st_delta_cop", env_id, scalar_shape)
+        delta_cop = self._get_metric_slice("delta_cop", env_id, scalar_shape)
+        vz = self._get_metric_slice("vz", env_id, scalar_shape)
+        az = self._get_metric_slice("az", env_id, scalar_shape)
+        cop_margin = self._get_metric_slice("cop_margin", env_id, scalar_shape)
+        contact_area_ratio = self._get_metric_slice("contact_area_ratio", env_id, scalar_shape)
+        rho_peak = self._get_metric_slice("rho_peak", env_id, scalar_shape)
+        landing_window = self._get_metric_slice("landing_window", env_id, scalar_shape)
+
+        landing_event_mask = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.bool)
+        landing_F_peak_norm = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.float32)
+        landing_dF_peak_norm = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.float32)
+        landing_rho_peak_event = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.float32)
+        landing_force_norm_step = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.float32)
+        landing_dF_norm_step = torch.zeros(scalar_shape, device=self._env.device, dtype=torch.float32)
+        if self._last_metrics is not None:
+            if "landing_event_mask" in self._last_metrics:
+                landing_event_mask = self._last_metrics["landing_event_mask"][env_id].detach().clone()
+            if "landing_F_peak_norm" in self._last_metrics:
+                landing_F_peak_norm = self._last_metrics["landing_F_peak_norm"][env_id].detach().clone()
+            if "landing_dF_peak_norm" in self._last_metrics:
+                landing_dF_peak_norm = self._last_metrics["landing_dF_peak_norm"][env_id].detach().clone()
+            if "landing_rho_peak_event" in self._last_metrics:
+                landing_rho_peak_event = self._last_metrics["landing_rho_peak_event"][env_id].detach().clone()
+            if "landing_force_norm_step" in self._last_metrics:
+                landing_force_norm_step = self._last_metrics["landing_force_norm_step"][env_id].detach().clone()
+            if "landing_dF_norm_step" in self._last_metrics:
+                landing_dF_norm_step = self._last_metrics["landing_dF_norm_step"][env_id].detach().clone()
+
+        w_cop = float(debug_context.get("w_cop", 0.0))
+        w_area = float(debug_context.get("w_area", 0.0))
+        r_contact_base = torch.nan_to_num(w_cop * r_cop + w_area * r_area, nan=0.0, posinf=0.0, neginf=0.0)
+
+        enable_land = 1.0 if bool(debug_context.get("enable_contact_quality_on_landing", True)) else 0.0
+        enable_st = 1.0 if bool(debug_context.get("enable_contact_quality_on_stance", True)) else 0.0
+        gamma_land = max(float(debug_context.get("gamma_land", 0.0)), 0.0)
+        gamma_st = max(float(debug_context.get("gamma_st", 0.0)), 0.0)
+        contact_phase_weight = torch.nan_to_num(
+            enable_land * gamma_land * alpha_land + enable_st * gamma_st * alpha_st,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        if bool(debug_context.get("enable_contact_quality_reward", False)):
+            r_contact = torch.nan_to_num(contact_phase_weight * r_contact_base, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            r_contact = torch.zeros_like(r_contact_base)
+
+        if bool(debug_context.get("enable_landing_event_penalty", False)):
+            landing_event_penalty = torch.where(
+                landing_event_mask,
+                -float(debug_context.get("w_land_F", 0.0)) * landing_F_peak_norm
+                - float(debug_context.get("w_land_dF", 0.0)) * landing_dF_peak_norm
+                - float(debug_context.get("w_land_rho", 0.0)) * landing_rho_peak_event,
+                torch.zeros_like(landing_F_peak_norm),
             )
-            landing_event_penalty_per_foot = torch.where(
-                landing_end,
-                landing_penalty_raw,
-                torch.zeros_like(landing_penalty_raw),
-            )
-            landing_event_penalty_per_foot = torch.nan_to_num(
-                landing_event_penalty_per_foot,
+        else:
+            landing_event_penalty = torch.zeros_like(landing_F_peak_norm)
+        landing_event_penalty = torch.nan_to_num(landing_event_penalty, nan=0.0, posinf=0.0, neginf=0.0)
+
+        landing_dense_F = torch.zeros_like(landing_force_norm_step)
+        landing_dense_dF = torch.zeros_like(landing_dF_norm_step)
+        landing_dense_reward = torch.zeros_like(landing_force_norm_step)
+        if bool(debug_context.get("enable_landing_dense_reward", False)):
+            land_dense_F_ref = max(float(debug_context.get("land_dense_F_ref", 1.0)), 1e-6)
+            F_excess = torch.clamp(landing_force_norm_step - land_dense_F_ref, min=0.0)
+            dF_excess = torch.clamp(landing_dF_norm_step - 1.0, min=0.0)
+            landing_dense_F = -torch.square(F_excess)
+            landing_dense_dF = -torch.square(dF_excess)
+            landing_dense_reward = torch.nan_to_num(
+                alpha_land
+                * (
+                    float(debug_context.get("w_land_dense_F", 0.0)) * landing_dense_F
+                    + float(debug_context.get("w_land_dense_dF", 0.0)) * landing_dense_dF
+                ),
                 nan=0.0,
                 posinf=0.0,
                 neginf=0.0,
             )
-            R_landing_event = landing_event_penalty_per_foot.sum(dim=-1)
 
-            clear_mask = ~landing_window_active
-            self._landing_F_peak = torch.where(clear_mask, torch.zeros_like(self._landing_F_peak), self._landing_F_peak)
-            self._landing_dF_peak = torch.where(clear_mask, torch.zeros_like(self._landing_dF_peak), self._landing_dF_peak)
-            self._landing_rho_peak_max = torch.where(
-                clear_mask,
-                torch.zeros_like(self._landing_rho_peak_max),
-                self._landing_rho_peak_max,
+        return {
+            "alpha_sw": alpha_sw,
+            "alpha_pre": alpha_pre,
+            "alpha_land": alpha_land,
+            "alpha_st": alpha_st,
+            "r_sw_h": r_sw_h,
+            "r_pre_v": r_pre_v,
+            "r_pre_a": r_pre_a,
+            "r_st_cop": r_cop,
+            "r_st_area": r_area,
+            "r_st_delta_cop": r_st_delta_cop,
+            "delta_cop": delta_cop,
+            "r_cop": r_cop,
+            "r_area": r_area,
+            "r_contact_base": r_contact_base,
+            "contact_phase_weight": contact_phase_weight,
+            "r_contact": r_contact,
+            "landing_F_peak": self._landing_F_peak[env_id].detach().clone(),
+            "landing_dF_peak": self._landing_dF_peak[env_id].detach().clone(),
+            "landing_rho_peak_max": self._landing_rho_peak_max[env_id].detach().clone(),
+            "landing_event_penalty": landing_event_penalty,
+            "r_land_dense_f": landing_dense_F,
+            "r_land_dense_df": landing_dense_dF,
+            "r_land_dense": landing_dense_reward,
+            "vz": vz,
+            "az": az,
+            "cop_margin": cop_margin,
+            "contact_area_ratio": contact_area_ratio,
+            "rho_peak": rho_peak,
+            "landing_window": landing_window,
+            "enable_land": torch.full(scalar_shape, enable_land, device=self._env.device, dtype=torch.float32),
+            "enable_st": torch.full(scalar_shape, enable_st, device=self._env.device, dtype=torch.float32),
+            "gamma_land": torch.full(scalar_shape, gamma_land, device=self._env.device, dtype=torch.float32),
+            "gamma_st": torch.full(scalar_shape, gamma_st, device=self._env.device, dtype=torch.float32),
+        }
+
+
+class contact_stage_reward_v1(ManagerTermBase):
+    """Stage-aware reward V1: PreLanding + contact-phase dense terms + Landing event penalty."""
+
+    SWING_STAGE_ID = _ContactStageRewardV1SharedCore.SWING_STAGE_ID
+    PRE_STAGE_ID = _ContactStageRewardV1SharedCore.PRE_STAGE_ID
+    LANDING_STAGE_ID = _ContactStageRewardV1SharedCore.LANDING_STAGE_ID
+    STANCE_STAGE_ID = _ContactStageRewardV1SharedCore.STANCE_STAGE_ID
+
+    def __init__(self, cfg: "RewardTermCfg", env: "ManagerBasedRLEnv"):
+        super().__init__(cfg, env)
+        self._stage_sensor_cfg = cfg.params.get("stage_sensor_cfg", SceneEntityCfg("contact_stage_filter"))
+        self._tactile_sensor_cfg = cfg.params.get("tactile_sensor_cfg", SceneEntityCfg("foot_tactile"))
+        self._asset_cfg = cfg.params.get("asset_cfg", SceneEntityCfg("robot"))
+        self._num_feet = int(cfg.params.get("num_feet", 2))
+        self._debug_context: dict[str, Any] = {}
+
+        registry = getattr(env, "_contact_stage_reward_v1_shared_cores", None)
+        if registry is None:
+            registry = {}
+            setattr(env, "_contact_stage_reward_v1_shared_cores", registry)
+        self._shared_core_key = self._make_shared_core_key(cfg.params)
+        core = registry.get(self._shared_core_key)
+        if core is None:
+            core = _ContactStageRewardV1SharedCore(
+                env=env,
+                stage_sensor_cfg=self._stage_sensor_cfg,
+                tactile_sensor_cfg=self._tactile_sensor_cfg,
+                asset_cfg=self._asset_cfg,
+                num_feet=self._num_feet,
             )
-            self._landing_active_prev = landing_window_active
-        else:
-            self._landing_active_prev[:] = False
-            self._landing_F_peak[:] = 0.0
-            self._landing_dF_peak[:] = 0.0
-            self._landing_rho_peak_max[:] = 0.0
+            registry[self._shared_core_key] = core
+        self._shared_core = core
 
+    @staticmethod
+    def _make_shared_core_key(params: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            _scene_entity_signature(params.get("stage_sensor_cfg", SceneEntityCfg("contact_stage_filter"))),
+            _scene_entity_signature(params.get("tactile_sensor_cfg", SceneEntityCfg("foot_tactile"))),
+            _scene_entity_signature(params.get("asset_cfg", SceneEntityCfg("robot"))),
+            str(params.get("swing_command_name", "base_velocity")),
+            float(params.get("swing_vel_threshold", 0.15)),
+            float(params.get("swing_h_ref", 0.07)),
+            float(params.get("pre_vz_ref", 0.24)),
+            float(params.get("pre_az_ref", 7.0)),
+            float(params.get("pre_az_filter_alpha", 0.7)),
+            float(params.get("land_dF_ref", 3500.0)),
+            float(params.get("body_weight", 420.0)),
+            float(params.get("cop_margin_max", 0.038)),
+            float(params.get("delta_cop_ref", 0.01)),
+            float(params.get("contact_quality_eps", 1e-6)),
+        )
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        self._shared_core.reset(env_ids)
+
+    def get_debug_dict(self, env_id: int) -> dict[str, torch.Tensor]:
+        return self._shared_core.get_debug_dict(env_id, self._debug_context)
+
+    def _compute_warmup_scale(
+        self,
+        env: "ManagerBasedRLEnv",
+        enable_stage_reward_warmup: bool,
+        stage_reward_warmup_steps: int,
+    ) -> float:
         warmup_scale = 1.0
         if enable_stage_reward_warmup:
             warmup_steps = max(int(stage_reward_warmup_steps), 0)
@@ -850,44 +997,164 @@ class contact_stage_reward_v1(ManagerTermBase):
                 if callable(warmup_iteration_getter):
                     warmup_progress = float(max(int(warmup_iteration_getter()), 0))
                 else:
-                    # Fallback for env variants that do not expose PPO iteration context.
                     common_steps_raw = getattr(env, "common_step_counter", None)
                     warmup_progress = float(max(int(common_steps_raw), 0)) if common_steps_raw is not None else 0.0
                 warmup_scale = min(warmup_progress / float(warmup_steps), 1.0)
-        reward = torch.nan_to_num((R_stage + R_landing_event) * float(warmup_scale), nan=0.0, posinf=0.0, neginf=0.0)
+        return warmup_scale
 
-        self._debug_alpha_sw[:] = torch.nan_to_num(alpha_sw, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_alpha_pre[:] = torch.nan_to_num(alpha_pre, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_alpha_land[:] = torch.nan_to_num(alpha_land, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_alpha_st[:] = torch.nan_to_num(alpha_st, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_sw_h[:] = torch.nan_to_num(r_sw_h, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_pre_v[:] = torch.nan_to_num(r_pre_v, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_pre_a[:] = torch.nan_to_num(r_pre_a, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_st_cop[:] = torch.nan_to_num(r_cop, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_st_area[:] = torch.nan_to_num(r_area, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_st_delta_cop[:] = torch.nan_to_num(r_st_delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_delta_cop[:] = torch.nan_to_num(delta_cop, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_contact_base[:] = torch.nan_to_num(r_contact_base, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_contact_phase_weight[:] = torch.nan_to_num(contact_phase_weight, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_r_contact[:] = torch.nan_to_num(r_contact, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_landing_event_penalty[:] = landing_event_penalty_per_foot
-        self._debug_vz[:] = torch.nan_to_num(vz, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_az[:] = torch.nan_to_num(az, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_cop_margin[:] = torch.nan_to_num(cop_margin, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_contact_area_ratio[:] = torch.nan_to_num(contact_area_ratio, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_rho_peak[:] = torch.nan_to_num(stage_data.rho_peak, nan=0.0, posinf=0.0, neginf=0.0)
-        self._debug_landing_window[:] = stage_data.landing_window.to(dtype=torch.float32)
-        self._debug_enable_land = enable_land
-        self._debug_enable_st = enable_st
-        self._debug_gamma_land = gamma_land
-        self._debug_gamma_st = gamma_st
+    def __call__(
+        self,
+        env: "ManagerBasedRLEnv",
+        stage_sensor_cfg: Optional[SceneEntityCfg] = None,
+        tactile_sensor_cfg: Optional[SceneEntityCfg] = None,
+        asset_cfg: Optional[SceneEntityCfg] = None,
+        enable_stage_reward_v1: bool = True,
+        enable_swing_clearance_reward: bool = False,
+        w_swing_h: float = 0.08,
+        swing_h_ref: float = 0.07,
+        swing_command_name: str = "base_velocity",
+        swing_vel_threshold: float = 0.15,
+        enable_prelanding_reward: bool = True,
+        pre_vz_ref: float = 0.24,
+        pre_az_ref: float = 7.0,
+        pre_az_filter_alpha: float = 0.7,
+        w_pre_v: float = 0.22,
+        w_pre_a: float = 0.035,
+        enable_landing_event_penalty: bool = True,
+        w_land_F: float = 0.22,
+        w_land_dF: float = 0.10,
+        w_land_rho: float = 0.10,
+        enable_landing_dense_reward: bool = False,
+        w_land_dense_F: float = 0.0,
+        w_land_dense_dF: float = 0.0,
+        land_dense_F_ref: float = 1.0,
+        land_dF_ref: float = 3500.0,
+        body_weight: float = 420.0,
+        enable_contact_quality_reward: bool = True,
+        enable_contact_quality_on_landing: bool = True,
+        enable_contact_quality_on_stance: bool = True,
+        gamma_land: float = 0.6,
+        gamma_st: float = 1.0,
+        cop_margin_max: float = 0.038,
+        w_cop: float = 0.24,
+        w_area: float = 0.18,
+        enable_stance_delta_cop_reward: bool = True,
+        w_st_delta_cop: float = 0.03,
+        delta_cop_ref: float = 0.01,
+        contact_quality_eps: float = 1e-6,
+        enable_stage_reward_warmup: bool = True,
+        stage_reward_warmup_steps: int = 10000,
+        enable_self_check: bool = True,
+        enable_debug_buffers: bool = False,
+    ) -> torch.Tensor:
+        del stage_sensor_cfg, tactile_sensor_cfg, asset_cfg
+        if not enable_stage_reward_v1:
+            return _zero_reward(env)
+
+        metrics = self._shared_core.compute(
+            env=env,
+            swing_command_name=swing_command_name,
+            swing_vel_threshold=swing_vel_threshold,
+            swing_h_ref=swing_h_ref,
+            pre_vz_ref=pre_vz_ref,
+            pre_az_ref=pre_az_ref,
+            pre_az_filter_alpha=pre_az_filter_alpha,
+            land_dF_ref=land_dF_ref,
+            body_weight=body_weight,
+            cop_margin_max=cop_margin_max,
+            delta_cop_ref=delta_cop_ref,
+            contact_quality_eps=contact_quality_eps,
+            enable_debug_buffers=enable_debug_buffers,
+        )
+        if metrics is None:
+            return _zero_reward(env)
+
+        alpha_sw = metrics["alpha_sw"]
+        alpha_pre = metrics["alpha_pre"]
+        alpha_land = metrics["alpha_land"]
+        alpha_st = metrics["alpha_st"]
+
+        reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        if enable_swing_clearance_reward:
+            reward += (alpha_sw * float(w_swing_h) * metrics["r_sw_h"]).sum(dim=-1)
+        if enable_prelanding_reward:
+            r_pre = float(w_pre_v) * metrics["r_pre_v"] + float(w_pre_a) * metrics["r_pre_a"]
+            reward += torch.nan_to_num(alpha_pre * r_pre, nan=0.0, posinf=0.0, neginf=0.0).sum(dim=-1)
+        if enable_contact_quality_reward:
+            enable_land = 1.0 if bool(enable_contact_quality_on_landing) else 0.0
+            enable_st = 1.0 if bool(enable_contact_quality_on_stance) else 0.0
+            gamma_land = max(float(gamma_land), 0.0)
+            gamma_st = max(float(gamma_st), 0.0)
+            contact_phase_weight = torch.nan_to_num(
+                enable_land * gamma_land * alpha_land + enable_st * gamma_st * alpha_st,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            r_contact_base = torch.nan_to_num(
+                float(w_cop) * metrics["r_cop"] + float(w_area) * metrics["r_area"],
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            reward += torch.nan_to_num(contact_phase_weight * r_contact_base, nan=0.0, posinf=0.0, neginf=0.0).sum(dim=-1)
+        if enable_stance_delta_cop_reward:
+            reward += (alpha_st * float(w_st_delta_cop) * metrics["r_st_delta_cop"]).sum(dim=-1)
+        if enable_landing_dense_reward:
+            land_dense_F_ref = max(float(land_dense_F_ref), 1e-6)
+            landing_dense_F = -torch.square(
+                torch.clamp(metrics["landing_force_norm_step"] - land_dense_F_ref, min=0.0)
+            )
+            landing_dense_dF = -torch.square(torch.clamp(metrics["landing_dF_norm_step"] - 1.0, min=0.0))
+            landing_dense = torch.nan_to_num(
+                alpha_land
+                * (
+                    float(w_land_dense_F) * landing_dense_F
+                    + float(w_land_dense_dF) * landing_dense_dF
+                ),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            reward += landing_dense.sum(dim=-1)
+
+        if enable_landing_event_penalty:
+            landing_penalty = torch.where(
+                metrics["landing_event_mask"],
+                -float(w_land_F) * metrics["landing_F_peak_norm"]
+                - float(w_land_dF) * metrics["landing_dF_peak_norm"]
+                - float(w_land_rho) * metrics["landing_rho_peak_event"],
+                torch.zeros_like(metrics["landing_F_peak_norm"]),
+            )
+            reward += torch.nan_to_num(landing_penalty, nan=0.0, posinf=0.0, neginf=0.0).sum(dim=-1)
+
+        warmup_scale = self._compute_warmup_scale(env, enable_stage_reward_warmup, stage_reward_warmup_steps)
+        reward = torch.nan_to_num(reward * float(warmup_scale), nan=0.0, posinf=0.0, neginf=0.0)
+
+        self._debug_context = {
+            "enable_contact_quality_reward": enable_contact_quality_reward,
+            "enable_contact_quality_on_landing": enable_contact_quality_on_landing,
+            "enable_contact_quality_on_stance": enable_contact_quality_on_stance,
+            "gamma_land": gamma_land,
+            "gamma_st": gamma_st,
+            "w_cop": w_cop,
+            "w_area": w_area,
+            "enable_landing_event_penalty": enable_landing_event_penalty,
+            "w_land_F": w_land_F,
+            "w_land_dF": w_land_dF,
+            "w_land_rho": w_land_rho,
+            "enable_landing_dense_reward": enable_landing_dense_reward,
+            "w_land_dense_F": w_land_dense_F,
+            "w_land_dense_dF": w_land_dense_dF,
+            "land_dense_F_ref": land_dense_F_ref,
+        }
 
         if enable_self_check:
-            if not torch.isfinite(az).all():
+            if not torch.isfinite(metrics["az"]).all():
                 raise RuntimeError("contact_stage_reward_v1 produced invalid az.")
             if not torch.isfinite(reward).all():
                 raise RuntimeError("contact_stage_reward_v1 produced NaN/inf reward.")
-            if enable_landing_event_penalty and not torch.isfinite(self._landing_F_peak).all():
+            if enable_landing_event_penalty and not torch.isfinite(self._shared_core._landing_F_peak).all():
                 raise RuntimeError("contact_stage_reward_v1 landing cache contains NaN/inf.")
 
         return reward

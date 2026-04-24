@@ -80,7 +80,7 @@ class DualCriticAmpAlgoCfg(AmpAlgoCfg):
 @configclass
 class G1ParkourPPORunnerCfg(InstinctRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 30000
+    max_iterations = 50000
     save_interval = 5000
     experiment_name = "g1_parkour"
     resume = False

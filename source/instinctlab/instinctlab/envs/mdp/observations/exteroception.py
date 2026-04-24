@@ -392,7 +392,7 @@ def visualizable_image(
     )
 
     # obtain the input image
-    images = sensor.data.output[data_type].clone()  # (N, H, W, C) or (N, history, H, W, C)
+    images = sensor.data.output[data_type]  # (N, H, W, C) or (N, history, H, W, C)
     if "history" in data_type:
         # NOTE: Only depth-related data types with history are supported. where C = 1.
         images = images.squeeze(
@@ -453,6 +453,7 @@ class delayed_visualizable_image(ManagerTermBase):
             ),
             dims=(0,),
         )  # (num_output_frames,)
+        self._base_frame_indices = self.sensor_history_length - self.frame_offset - 1
 
         self.check_delay_bounds()
 
@@ -503,29 +504,21 @@ class delayed_visualizable_image(ManagerTermBase):
         Get the delayed frames from the sensor data.
         """
         # obtain the input image
-        images = self.sensor.data.output[self.data_type].clone()  # (N, history, H, W, C)
+        images = self.sensor.data.output[self.data_type]  # (N, history, H, W, C)
         # NOTE: Only depth-related data types with history are supported for now. where C = 1.
         images = images.squeeze(
             -1
         )  # (N, history, H, W, C) -> (N, history, H, W), images[:, -1] shall be the latest frame.
         # get the delayed frames
-        frame_indices = (
-            self.sensor_history_length - self.frame_offset.unsqueeze(0) - self._num_delayed_frames.unsqueeze(1) - 1
-        )  # (N, num_output_frames)
+        frame_indices = self._base_frame_indices.unsqueeze(0) - self._num_delayed_frames.unsqueeze(1)  # (N, num_output_frames)
         frame_indices = frame_indices.to(torch.long)
         # final safety check to avoid frame_indices being out of bounds
         assert (frame_indices >= 0).all(), f"frame_indices should be non-negative, but got {frame_indices}"
         assert (
             frame_indices < self.sensor_history_length
         ).all(), f"frame_indices should be less than the sensor history length {self.sensor_history_length}"
-        # Use advanced indexing: create batch indices and use them together with frame_indices
-        batch_indices = (
-            torch.arange(images.shape[0], device=images.device)
-            .unsqueeze(1)
-            .expand(-1, frame_indices.shape[1])
-            .to(torch.long)
-        )
-        delayed_frames = images[batch_indices, frame_indices]  # (N, num_output_frames, H, W)
+        gather_index = frame_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, images.shape[2], images.shape[3])
+        delayed_frames = torch.gather(images, dim=1, index=gather_index)  # (N, num_output_frames, H, W)
         if debug_vis:
             # (N, num_output_frames, H, W) -> (num_output_frames, H, N, W) -> (num_output_frames * H, N * W)
             _debug_visualize_image(

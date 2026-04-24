@@ -163,10 +163,11 @@ class InstinctRlVecEnvWrapper(VecEnv):
         # record step information
         obs_pack, rew, terminated, truncated, extras = self.env.step(actions)
         extras["step"] = extras.get("step", {})
-        extras["step"].update(self._compute_reset_step_stats(terminated, truncated))
-        extras["step"].update(self._compute_foot_contact_state_step_stats(obs_pack))
-        extras["step"].update(self._compute_foot_tactile_step_stats())
-        extras["step"].update(self._compute_contact_stage_step_stats())
+        if bool(getattr(self.unwrapped.cfg, "enable_wrapper_step_diagnostics", True)):
+            extras["step"].update(self._compute_reset_step_stats(terminated, truncated))
+            extras["step"].update(self._compute_foot_contact_state_step_stats(obs_pack))
+            extras["step"].update(self._compute_foot_tactile_step_stats())
+            extras["step"].update(self._compute_contact_stage_step_stats())
         obs_pack = self._flatten_all_obs_groups(obs_pack)
         # compute dones for compatibility with RSL-RL
         dones = (terminated | truncated).to(dtype=torch.long)

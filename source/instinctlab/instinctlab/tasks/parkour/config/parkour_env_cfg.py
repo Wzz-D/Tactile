@@ -65,7 +65,11 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "w_land_F": 0.0,
     "w_land_dF": 0.0,
     "w_land_rho": 0.0,
-    "land_dF_ref": 70000.0,
+    "enable_landing_dense_reward": False,
+    "w_land_dense_F": 0.0,
+    "w_land_dense_dF": 0.0,
+    "land_dense_F_ref": 1.0,
+    "land_dF_ref": 40000.0,
     "body_weight": 350.0,
     "cop_margin_max": 0.038,
     "contact_quality_eps": 1e-6,
@@ -81,8 +85,9 @@ _STAGE_REWARD_V1_COMMON_PARAMS = {
     "gamma_st": 1.0,
     "enable_stage_reward_warmup": True,
     # Warmup horizon in PPO training iterations, aligned with TensorBoard's iteration axis.
-    "stage_reward_warmup_steps": 8000,
-    "enable_self_check": True,
+    "stage_reward_warmup_steps": 6000,
+    "enable_self_check": False,
+    "enable_debug_buffers": False,
 }
 
 ##
@@ -97,11 +102,11 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     horizontal_scale=0.05,
     vertical_scale=0.005,
     slope_threshold=1.0,
-    use_cache=False,
+    use_cache=True,
     curriculum=True,
     sub_terrains={
         "perlin_rough": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0.0,
+            proportion=0.05,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -118,7 +123,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "perlin_rough_stand": terrain_gen.PerlinPlaneTerrainCfg(
-            proportion=0,
+            proportion=0.05,
             noise_scale=[0.0, 0.1],
             noise_frequency=20,
             fractal_octaves=2,
@@ -135,7 +140,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "square_gaps": terrain_gen.PerlinSquareGapTerrainCfg(
-            proportion=0,
+            proportion=0.10,
             gap_distance_range=(0.1, 0.7),
             gap_depth=(0.4, 0.6),
             platform_width=2.5,
@@ -154,7 +159,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.5,
+            proportion=0.15,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -181,7 +186,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_high": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.0,
+            proportion=0.10,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -208,7 +213,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.5,
+            proportion=0.15,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -235,7 +240,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv_high": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0,
+            proportion=0.10,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -262,7 +267,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "boxes": terrain_gen.PerlinDiscreteObstaclesTerrainCfg(
-            proportion=0,
+            proportion=0.10,
             num_obstacles=20,
             obstacle_height_mode="fixed",
             obstacle_width_range=(0.8, 1.5),
@@ -287,7 +292,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "mesh_boxes": terrain_gen.PerlinMeshRandomMultiBoxTerrainCfg(
-            proportion=0,
+            proportion=0.10,
             box_height_mean=[0.1, 0.4],
             box_height_range=0.05,
             box_length_mean=0.4,
@@ -305,7 +310,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "hf_pyramid_slope_inv": terrain_gen.PerlinInvertedPyramidSlopedTerrainCfg(
-            proportion=0.0,
+            proportion=0.10,
             slope_range=(0.0, 0.7),
             platform_width=1.5,
             border_width=1.0,
@@ -712,6 +717,7 @@ class CommandsCfg:
         velocity_control_stiffness=2.0,
         heading_control_stiffness=2.0,
         rel_standing_envs=0.05,
+        # rel_standing_envs=0.0,
         ranges=mdp.PoseVelocityCommandCfg.Ranges(lin_vel_x=(0.0, 0.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(-1.0, 1.0)),
         random_velocity_terrain=["perlin_rough_stand"],
         velocity_ranges={
@@ -958,7 +964,7 @@ class G1Rewards:
             "w_pre_v": 0.0,
             "w_pre_a": 0.0,
             "enable_landing_event_penalty": True,
-            "w_land_F": 0.30,
+            "w_land_F": 0.36,
             "w_land_dF": 0.0,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": False,
@@ -976,7 +982,7 @@ class G1Rewards:
             "w_pre_a": 0.0,
             "enable_landing_event_penalty": True,
             "w_land_F": 0.0,
-            "w_land_dF": 0.14,
+            "w_land_dF": 0.16,
             "w_land_rho": 0.0,
             "enable_contact_quality_reward": False,
             "w_cop": 0.0,
@@ -998,6 +1004,30 @@ class G1Rewards:
             "enable_contact_quality_reward": False,
             "w_cop": 0.0,
             "w_area": 0.0,
+        },
+    )
+    stage_landing_dense_v1 = RewTerm(
+        func=mdp.contact_stage_reward_v1,
+        weight=1.0,
+        params={
+            **_STAGE_REWARD_V1_COMMON_PARAMS,
+            "enable_prelanding_reward": False,
+            "w_pre_v": 0.0,
+            "w_pre_a": 0.0,
+            "enable_landing_event_penalty": False,
+            "w_land_F": 0.0,
+            "w_land_dF": 0.0,
+            "w_land_rho": 0.0,
+            "enable_landing_dense_reward": True,
+            "w_land_dense_F": 0.10,
+            "w_land_dense_dF": 0.12,
+            "land_dF_ref": 40000.0,
+            "land_dense_F_ref": 1.0,
+            "enable_contact_quality_reward": False,
+            "w_cop": 0.0,
+            "w_area": 0.0,
+            "enable_stance_delta_cop_reward": False,
+            "w_st_delta_cop": 0.0,
         },
     )
 #--------------------------------------------------------------------------------------------------------------------------------------
@@ -1066,6 +1096,7 @@ _DENSE_REWARD_TERM_NAMES = (
     "pelvis_orientation_l2",
     "feet_flat_ori",
     "stage_swing_clearance_v1",
+    "stage_landing_dense_v1",
     "stage_stance_cop_v1",
     "stage_stance_area_v1",
     "stage_stance_delta_cop_v1",
@@ -1133,6 +1164,7 @@ class DenseRewardGroupCfg:
     pelvis_orientation_l2 = copy.deepcopy(_G1_REWARD_TEMPLATE.pelvis_orientation_l2)
     feet_flat_ori = copy.deepcopy(_G1_REWARD_TEMPLATE.feet_flat_ori)
     stage_swing_clearance_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_swing_clearance_v1)
+    stage_landing_dense_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_landing_dense_v1)
     stage_stance_cop_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_cop_v1)
     stage_stance_area_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_area_v1)
     stage_stance_delta_cop_v1 = copy.deepcopy(_G1_REWARD_TEMPLATE.stage_stance_delta_cop_v1)
@@ -1178,6 +1210,7 @@ class TerminationsCfg:
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     terrain_out_bound = DoneTerm(func=mdp.terrain_out_of_bounds, time_out=True, params={"distance_buffer": 2.0})
+    # target_reached = None
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
         params={
@@ -1220,6 +1253,17 @@ class EventCfg:
                 "yaw": (-0.2, 0.2),
             },
         },
+        # params={
+        #     "pose_range": {"x": (-0.0, 0.0), "y": (-0.0, 0.0), "yaw": (-0.0, 0.0)},
+        #     "velocity_range": {
+        #         "x": (-0.0, 0.0),
+        #         "y": (-0.0, 0.0),
+        #         "z": (-0.0, 0.0),
+        #         "roll": (-0.0, 0.0),
+        #         "pitch": (-0.0, 0.0),
+        #         "yaw": (-0.0, 0.0),
+        #     },
+        # },
     )
 
     register_virtual_obstacles = EventTerm(
@@ -1235,6 +1279,7 @@ class EventCfg:
         mode="reset",
         params={
             "position_range": (-0.15, 0.15),
+            # "position_range": (-0.0, 0.0),
             "velocity_range": (0.0, 0.0),
         },
     )
@@ -1273,6 +1318,10 @@ class ParkourEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     monitors: MonitorCfg = MonitorCfg()
+    # Training-time performance toggles. Keep heavy step diagnostics off by default;
+    # debug/eval paths can opt back in when they need these series.
+    enable_wrapper_step_diagnostics: bool = False
+    enable_pre_reset_sensor_snapshot_stats: bool = False
 
     def __post_init__(self):
         """Post initialization."""
