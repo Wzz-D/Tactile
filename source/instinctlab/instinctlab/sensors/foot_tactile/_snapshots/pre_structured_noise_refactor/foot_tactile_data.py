@@ -14,7 +14,6 @@ class FootTactileData:
     foot_normal_w: torch.Tensor = MISSING
 
     taxel_xy_b: torch.Tensor = MISSING
-    taxel_xy_measured_b: torch.Tensor = MISSING
     valid_taxel_mask: torch.Tensor = MISSING
     edge_taxel_mask: torch.Tensor = MISSING
 
@@ -51,7 +50,6 @@ class FootTactileData:
             quat_w=torch.zeros((num_envs, num_bodies, 4), device=device, dtype=dtype),
             foot_normal_w=torch.zeros((num_envs, num_bodies, 3), device=device, dtype=dtype),
             taxel_xy_b=torch.zeros((num_bodies, max_taxels, 2), device=device, dtype=dtype),
-            taxel_xy_measured_b=torch.zeros((num_envs, num_bodies, max_taxels, 2), device=device, dtype=dtype),
             valid_taxel_mask=torch.zeros((num_bodies, max_taxels), device=device, dtype=torch.bool),
             edge_taxel_mask=torch.zeros((num_bodies, max_taxels), device=device, dtype=torch.bool),
             taxel_pos_w=torch.zeros((num_envs, num_bodies, max_taxels, 3), device=device, dtype=dtype),

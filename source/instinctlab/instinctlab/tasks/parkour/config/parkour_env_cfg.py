@@ -448,12 +448,19 @@ class SceneCfg(InteractiveSceneCfg):
         # noise
         noise_pipeline={
             "crop_and_resize": CropAndResizeCfg(crop_region=(18, 0, 16, 16)),
+            "range_based_gaussian_noise": RangeBasedGaussianNoiseCfg(min_value=0.5, max_value=2.5, noise_std=0.04),
+            "depth_artifact_noise": DepthArtifactNoiseCfg(
+                artifacts_height_mean_std=[4, 0.5],
+                artifacts_width_mean_std=[4, 0.5],
+                noise_value=10.0,
+            ),
             "gaussian_blur": GaussianBlurNoiseCfg(kernel_size=3, sigma=1),
             "depth_normalization": DepthNormalizationCfg(
                 depth_range=(0.0, 2.5),
                 normalize=True,
                 output_range=(0.0, 1.0),
             ),
+            "random_gaussian_noise": RandomGaussianNoiseCfg(probability=0.1, noise_mean=0.0, noise_std=0.2),
         },
         data_histories={"distance_to_image_plane_noised": 37},
     )
@@ -1225,7 +1232,6 @@ class TerminationsCfg:
 @configclass
 class EventCfg:
     """Configuration for events."""
-
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -1238,6 +1244,70 @@ class EventCfg:
             "make_consistent": True,
         },
     )
+
+    add_joint_default_pos = EventTerm(
+        func=instinct_mdp.randomize_default_joint_pos,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "offset_distribution_params": (-0.01, 0.01),
+            "operation": "add",
+            "distribution": "uniform",
+        },
+    )
+
+    base_com = EventTerm(
+        func=instinct_mdp.randomize_rigid_body_coms,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "coms_x_distribution_params": (-0.025, 0.025),
+            "coms_y_distribution_params": (-0.05, 0.05),
+            "coms_z_distribution_params": (-0.05, 0.05),
+            "distribution": "uniform",
+        },
+    )
+
+    add_base_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+            "mass_distribution_params": (-2.0, 2.0),
+            "operation": "add",
+        },
+    )
+
+    randomize_actuator_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "stiffness_distribution_params": (0.95, 1.05),
+            "damping_distribution_params": (0.95, 1.05),
+            "operation": "scale",
+            "distribution": "log_uniform",
+        },
+    )
+
+    randomize_camera_position = EventTerm(
+        func=mdp.randomize_camera_offsets,
+        mode="interval",
+        interval_range_s=(0.5, 2.0),
+        params={
+            "asset_cfg": SceneEntityCfg("camera"),
+            "offset_pose_ranges": {
+                "x": (-0.003, 0.003),
+                "y": (-0.01, 0.01),
+                "z": (-0.005, 0.005),
+                "roll": (-0.02, 0.02),
+                "pitch": (-0.03, 0.03),
+                "yaw": (-0.03, 0.03),
+            },
+            "distribution": "uniform",
+        },
+    )
+
     # reset
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -1281,6 +1351,23 @@ class EventCfg:
             "position_range": (-0.15, 0.15),
             # "position_range": (-0.0, 0.0),
             "velocity_range": (0.0, 0.0),
+        },
+    )
+    
+    # interval
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity_without_stand,
+        mode="interval",
+        interval_range_s=(7.0, 10.0),
+        params={
+            "velocity_range": {
+                "x": (-0.5, 0.5),
+                "y": (-0.5, 0.5),
+                "roll": (-0.52, 0.52),
+                "pitch": (-0.52, 0.52),
+                "yaw": (-0.78, 0.78),
+            },
+            "command_name": "base_velocity",
         },
     )
 
