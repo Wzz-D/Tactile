@@ -131,10 +131,8 @@ class FootTactile(SensorBase):
         self._data.peak_force[env_ids_t] = 0.0
         self._data.mean_force[env_ids_t] = 0.0
         self._data.cop_b[env_ids_t] = 0.0
-        self._sample_threshold_randomization(env_ids_t)
         if hasattr(self, "_noise_model") and self._noise_model is not None:
             self._noise_model.reset(env_ids)
-            self._data.taxel_xy_measured_b[env_ids_t] = self._noise_model.get_measured_taxel_xy_b(env_ids_t)
 
     def _initialize_impl(self):
         super()._initialize_impl()
@@ -207,7 +205,6 @@ class FootTactile(SensorBase):
             device=self.device,
         )
         self._data.taxel_xy_b[:] = self._template_taxel_xy_b
-        self._data.taxel_xy_measured_b[:] = self._template_taxel_xy_b.unsqueeze(0)
         self._data.valid_taxel_mask[:] = self._template_valid_mask
         self._data.edge_taxel_mask[:] = self._template_edge_mask
 
@@ -230,13 +227,7 @@ class FootTactile(SensorBase):
             max_taxels=self._max_taxels,
             device=self.device,
             dtype=self._data.taxel_force.dtype,
-            base_taxel_xy_b=self._data.taxel_xy_b,
-            valid_taxel_mask=self._data.valid_taxel_mask,
-            edge_taxel_mask=self._data.edge_taxel_mask,
-            body_sides=self._body_sides,
         )
-        self._data.taxel_xy_measured_b[:] = self._noise_model.get_measured_taxel_xy_b()
-        self._init_threshold_randomization()
 
     def _resolve_body_sides(self, body_names: list[str]) -> list[str]:
         body_sides = []
@@ -354,9 +345,8 @@ class FootTactile(SensorBase):
         current_forces_w = current_forces_w[:, self._contact_body_ids, :]
         projected_force = torch.sum(current_forces_w * self._data.foot_normal_w[env_ids], dim=-1)
         projected_force = torch.clamp(projected_force, min=0.0)
-        min_force_threshold = self._min_force_threshold[env_ids]
         projected_force = torch.where(
-            projected_force >= min_force_threshold,
+            projected_force >= self.cfg.min_force_threshold,
             projected_force,
             torch.zeros_like(projected_force),
         )
@@ -431,7 +421,6 @@ class FootTactile(SensorBase):
             valid_taxel_mask=self._data.valid_taxel_mask,
             env_ids=env_ids_t,
         )
-        self._data.taxel_xy_measured_b[env_ids_t] = self._noise_model.get_measured_taxel_xy_b(env_ids_t)
         self._data.taxel_force[env_ids] = torch.nan_to_num(
             taxel_force_measured, nan=0.0, posinf=0.0, neginf=0.0
         ).clamp_min(0.0)
@@ -442,7 +431,7 @@ class FootTactile(SensorBase):
         self._data.contact_area_ratio[env_ids] = compute_contact_area_ratio(
             measured_force,
             self._data.valid_taxel_mask,
-            self._active_taxel_threshold[env_ids],
+            self.cfg.active_taxel_threshold,
         )
         self._data.edge_force_ratio[env_ids] = compute_edge_force_ratio(
             measured_force,
@@ -457,7 +446,7 @@ class FootTactile(SensorBase):
         self._data.mean_force[env_ids] = mean_force
         self._data.cop_b[env_ids] = compute_cop_b(
             measured_force,
-            self._data.taxel_xy_measured_b[env_ids],
+            self._data.taxel_xy_b,
             self._data.valid_taxel_mask,
         )
 
@@ -492,60 +481,6 @@ class FootTactile(SensorBase):
         if isinstance(env_ids, torch.Tensor):
             return env_ids.to(device=self.device, dtype=torch.long).flatten()
         return torch.as_tensor(list(env_ids), device=self.device, dtype=torch.long).flatten()
-
-    def _init_threshold_randomization(self) -> None:
-        self._min_force_threshold = torch.full(
-            (self._num_envs, self._num_bodies),
-            float(self.cfg.min_force_threshold),
-            device=self.device,
-            dtype=self._data.taxel_force.dtype,
-        )
-        self._active_taxel_threshold = torch.full(
-            (self._num_envs, self._num_bodies),
-            float(self.cfg.active_taxel_threshold),
-            device=self.device,
-            dtype=self._data.taxel_force.dtype,
-        )
-        generator_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
-        self._threshold_generator = torch.Generator(device=generator_device)
-        if self.cfg.noise_cfg.seed is not None:
-            self._threshold_generator.manual_seed(int(self.cfg.noise_cfg.seed) + 17)
-        self._sample_threshold_randomization(torch.arange(self._num_envs, device=self.device, dtype=torch.long))
-
-    def _sample_threshold_randomization(self, env_ids_t: torch.Tensor) -> None:
-        if not hasattr(self, "_min_force_threshold"):
-            return
-        if not hasattr(self, "_threshold_generator"):
-            generator_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
-            self._threshold_generator = torch.Generator(device=generator_device)
-            if self.cfg.noise_cfg.seed is not None:
-                self._threshold_generator.manual_seed(int(self.cfg.noise_cfg.seed) + 17)
-        rand_cfg = self.cfg.threshold_randomization_cfg
-        self._min_force_threshold[env_ids_t] = float(self.cfg.min_force_threshold)
-        self._active_taxel_threshold[env_ids_t] = float(self.cfg.active_taxel_threshold)
-        if not rand_cfg.enable:
-            return
-
-        if rand_cfg.min_force_threshold_range is not None:
-            low, high = rand_cfg.min_force_threshold_range
-            self._min_force_threshold[env_ids_t] = self._rand_uniform_per_body(env_ids_t.numel(), low, high)
-        if rand_cfg.active_taxel_threshold_range is not None:
-            low, high = rand_cfg.active_taxel_threshold_range
-            self._active_taxel_threshold[env_ids_t] = self._rand_uniform_per_body(env_ids_t.numel(), low, high)
-
-    def _rand_uniform_per_body(self, num_envs: int, low: float, high: float) -> torch.Tensor:
-        low = float(low)
-        high = float(high)
-        if high < low:
-            low, high = high, low
-        if abs(high - low) < 1e-12:
-            return torch.full((num_envs, self._num_bodies), low, device=self.device, dtype=self._data.taxel_force.dtype)
-        return low + (high - low) * torch.rand(
-            (num_envs, self._num_bodies),
-            device=self.device,
-            dtype=self._data.taxel_force.dtype,
-            generator=self._threshold_generator,
-        )
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         if debug_vis:

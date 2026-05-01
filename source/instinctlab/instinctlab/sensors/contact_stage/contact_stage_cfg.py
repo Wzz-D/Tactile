@@ -9,6 +9,18 @@ from .contact_stage_filter import ContactStageFilter
 
 
 @configclass
+class ContactStageDecisionRandomizationCfg:
+    """Episode-level threshold randomization for tactile-to-stage interpretation."""
+
+    enable: bool = False
+    contact_force_on_range: tuple[float, float] | None = None
+    contact_force_off_range: tuple[float, float] | None = None
+    contact_area_on_range: tuple[float, float] | None = None
+    contact_area_off_range: tuple[float, float] | None = None
+    derivative_filter_alpha_range: tuple[float, float] | None = None
+
+
+@configclass
 class ContactStageCfg(SensorBaseCfg):
     """Configuration for the per-foot 4-stage contact filter."""
 
@@ -48,6 +60,7 @@ class ContactStageCfg(SensorBaseCfg):
     # debug/self-check
     enable_self_check: bool = True
     self_check_tol: float = 1e-4
+    decision_randomization_cfg: ContactStageDecisionRandomizationCfg = ContactStageDecisionRandomizationCfg()
 
     def validate(self):
         super().validate()
@@ -72,3 +85,36 @@ class ContactStageCfg(SensorBaseCfg):
         g_norm = math.sqrt(sum(component * component for component in self.gravity_dir_w))
         if g_norm < 1e-6:
             raise ValueError("gravity_dir_w must be non-zero")
+        rand_cfg = self.decision_randomization_cfg
+        for name, value_range in (
+            ("contact_force_on_range", rand_cfg.contact_force_on_range),
+            ("contact_force_off_range", rand_cfg.contact_force_off_range),
+            ("contact_area_on_range", rand_cfg.contact_area_on_range),
+            ("contact_area_off_range", rand_cfg.contact_area_off_range),
+            ("derivative_filter_alpha_range", rand_cfg.derivative_filter_alpha_range),
+        ):
+            if value_range is None:
+                continue
+            if value_range[0] > value_range[1]:
+                raise ValueError(f"{name} must satisfy low <= high")
+        if rand_cfg.contact_force_on_range is not None and rand_cfg.contact_force_off_range is not None:
+            if rand_cfg.contact_force_on_range[0] <= rand_cfg.contact_force_off_range[1]:
+                raise ValueError("contact_force_on_range must stay strictly above contact_force_off_range")
+        if rand_cfg.contact_area_on_range is not None and rand_cfg.contact_area_off_range is not None:
+            if rand_cfg.contact_area_on_range[0] <= rand_cfg.contact_area_off_range[1]:
+                raise ValueError("contact_area_on_range must stay strictly above contact_area_off_range")
+        if rand_cfg.derivative_filter_alpha_range is not None:
+            low, high = rand_cfg.derivative_filter_alpha_range
+            if low < 0.0 or high > 1.0:
+                raise ValueError("derivative_filter_alpha_range must lie in [0, 1]")
+
+
+def make_contact_stage_noise_E_threshold_cfg() -> ContactStageDecisionRandomizationCfg:
+    return ContactStageDecisionRandomizationCfg(
+        enable=True,
+        contact_force_on_range=(22.0, 28.0),
+        contact_force_off_range=(10.0, 14.0),
+        contact_area_on_range=(0.10, 0.14),
+        contact_area_off_range=(0.05, 0.07),
+        derivative_filter_alpha_range=(0.75, 0.85),
+    )

@@ -77,8 +77,8 @@ class ContactStageFilter(SensorBase):
         landing_window_active = stage_data.landing_window > 0
         h_zone_hit = stage_data.h_eff < float(self.cfg.h_zone)
         v_pre_hit = stage_data.foot_vz < -float(self.cfg.v_pre)
-        force_on_hit = stage_data.total_force > float(self.cfg.contact_force_on)
-        area_on_hit = stage_data.contact_area > float(self.cfg.contact_area_on)
+        force_on_hit = stage_data.total_force > self._contact_force_on_threshold
+        area_on_hit = stage_data.contact_area > self._contact_area_on_threshold
 
         return {
             "h_eff": stage_data.h_eff,
@@ -233,6 +233,7 @@ class ContactStageFilter(SensorBase):
         self._contact_on_counter[env_ids_t] = 0
         self._contact_off_counter[env_ids_t] = 0
         self._foot_pos_w[env_ids_t] = 0.0
+        self._sample_decision_randomization(env_ids_t)
 
     def _initialize_impl(self):
         super()._initialize_impl()
@@ -297,6 +298,7 @@ class ContactStageFilter(SensorBase):
         self._forefoot_mask = torch.zeros((self._num_bodies, 1), device=self.device, dtype=torch.bool)
         self._cop_ap_scale = torch.ones((self._num_bodies,), device=self.device, dtype=torch.float32)
         self._geometry_ready = False
+        self._init_decision_randomization()
 
     def _update_buffers_impl(self, env_ids: Union[Sequence[int], slice]):
         if not isinstance(env_ids, slice) and len(env_ids) == self._num_envs:
@@ -429,7 +431,7 @@ class ContactStageFilter(SensorBase):
         prev_area_filt = contact_area_filt_prev.clone()
         initialized = self._filter_initialized[env_ids]
 
-        alpha = float(min(max(self.cfg.derivative_filter_alpha, 0.0), 1.0))
+        alpha = self._derivative_filter_alpha[env_ids].clamp(0.0, 1.0)
         force_filt_candidate = alpha * force_raw + (1.0 - alpha) * prev_force_filt
         area_filt_candidate = alpha * area_raw + (1.0 - alpha) * prev_area_filt
         force_filt = torch.where(initialized, force_filt_candidate, force_raw)
@@ -465,8 +467,12 @@ class ContactStageFilter(SensorBase):
         off_counter = self._contact_off_counter[env_ids]
         landing_window = self._data.landing_window[env_ids]
 
-        on_cond = (force > float(self.cfg.contact_force_on)) & (area > float(self.cfg.contact_area_on))
-        off_cond = (force < float(self.cfg.contact_force_off)) & (area < float(self.cfg.contact_area_off))
+        on_force = self._contact_force_on_threshold[env_ids]
+        off_force = self._contact_force_off_threshold[env_ids]
+        on_area = self._contact_area_on_threshold[env_ids]
+        off_area = self._contact_area_off_threshold[env_ids]
+        on_cond = (force > on_force) & (area > on_area)
+        off_cond = (force < off_force) & (area < off_area)
 
         on_counter = torch.where((~active) & on_cond, on_counter + 1, torch.zeros_like(on_counter))
         off_counter = torch.where(active & off_cond, off_counter + 1, torch.zeros_like(off_counter))
@@ -638,6 +644,94 @@ class ContactStageFilter(SensorBase):
         if self.cfg.update_period > 0.0:
             return float(self.cfg.update_period)
         return float(self._sim_physics_dt)
+
+    def _init_decision_randomization(self) -> None:
+        self._contact_force_on_threshold = torch.full(
+            (self._num_envs, self._num_bodies),
+            float(self.cfg.contact_force_on),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_force_off_threshold = torch.full(
+            (self._num_envs, self._num_bodies),
+            float(self.cfg.contact_force_off),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_area_on_threshold = torch.full(
+            (self._num_envs, self._num_bodies),
+            float(self.cfg.contact_area_on),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_area_off_threshold = torch.full(
+            (self._num_envs, self._num_bodies),
+            float(self.cfg.contact_area_off),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._derivative_filter_alpha = torch.full(
+            (self._num_envs, self._num_bodies),
+            float(self.cfg.derivative_filter_alpha),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        generator_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+        self._decision_generator = torch.Generator(device=generator_device)
+        self._sample_decision_randomization(torch.arange(self._num_envs, device=self.device, dtype=torch.long))
+
+    def _sample_decision_randomization(self, env_ids_t: torch.Tensor) -> None:
+        if not hasattr(self, "_decision_generator"):
+            generator_device = "cuda" if str(self.device).startswith("cuda") else "cpu"
+            self._decision_generator = torch.Generator(device=generator_device)
+        rand_cfg = self.cfg.decision_randomization_cfg
+        self._contact_force_on_threshold[env_ids_t] = float(self.cfg.contact_force_on)
+        self._contact_force_off_threshold[env_ids_t] = float(self.cfg.contact_force_off)
+        self._contact_area_on_threshold[env_ids_t] = float(self.cfg.contact_area_on)
+        self._contact_area_off_threshold[env_ids_t] = float(self.cfg.contact_area_off)
+        self._derivative_filter_alpha[env_ids_t] = float(self.cfg.derivative_filter_alpha)
+        if not rand_cfg.enable:
+            return
+
+        if rand_cfg.contact_force_on_range is not None:
+            low, high = rand_cfg.contact_force_on_range
+            self._contact_force_on_threshold[env_ids_t] = self._rand_uniform_per_foot(env_ids_t.numel(), low, high)
+        if rand_cfg.contact_force_off_range is not None:
+            low, high = rand_cfg.contact_force_off_range
+            self._contact_force_off_threshold[env_ids_t] = self._rand_uniform_per_foot(env_ids_t.numel(), low, high)
+        self._contact_force_off_threshold[env_ids_t] = torch.minimum(
+            self._contact_force_off_threshold[env_ids_t],
+            self._contact_force_on_threshold[env_ids_t] - 1e-3,
+        )
+
+        if rand_cfg.contact_area_on_range is not None:
+            low, high = rand_cfg.contact_area_on_range
+            self._contact_area_on_threshold[env_ids_t] = self._rand_uniform_per_foot(env_ids_t.numel(), low, high)
+        if rand_cfg.contact_area_off_range is not None:
+            low, high = rand_cfg.contact_area_off_range
+            self._contact_area_off_threshold[env_ids_t] = self._rand_uniform_per_foot(env_ids_t.numel(), low, high)
+        self._contact_area_off_threshold[env_ids_t] = torch.minimum(
+            self._contact_area_off_threshold[env_ids_t],
+            self._contact_area_on_threshold[env_ids_t] - 1e-4,
+        ).clamp_min(0.0)
+
+        if rand_cfg.derivative_filter_alpha_range is not None:
+            low, high = rand_cfg.derivative_filter_alpha_range
+            self._derivative_filter_alpha[env_ids_t] = self._rand_uniform_per_foot(env_ids_t.numel(), low, high).clamp(0.0, 1.0)
+
+    def _rand_uniform_per_foot(self, num_envs: int, low: float, high: float) -> torch.Tensor:
+        low = float(low)
+        high = float(high)
+        if high < low:
+            low, high = high, low
+        if abs(high - low) < 1e-12:
+            return torch.full((num_envs, self._num_bodies), low, device=self.device, dtype=torch.float32)
+        return low + (high - low) * torch.rand(
+            (num_envs, self._num_bodies),
+            device=self.device,
+            dtype=torch.float32,
+            generator=self._decision_generator,
+        )
 
     def _resolve_env_ids_tensor(self, env_ids: Union[Sequence[int], slice, torch.Tensor, None]) -> torch.Tensor:
         if env_ids is None:

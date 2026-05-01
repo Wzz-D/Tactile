@@ -108,8 +108,34 @@ class ShoeConfigMixin:
             self.rewards.rewards.feet_at_plane.params["height_offset"] = 0.058
         if hasattr(self.rewards, "sparse") and getattr(self.rewards.sparse, "feet_at_plane", None) is not None:
             self.rewards.sparse.feet_at_plane.params["height_offset"] = 0.058
+        structured_noise_cfg = FootTactileNoiseCfg(
+            enable=True,
+            use_structured_profiles=True,
+        )
+        # First training version: keep the tactile randomization structured and low-frequency.
+        # This targets calibration/latency/stage-boundary mismatch without aggressively distorting
+        # total force or CoP semantics on day one.
+        structured_noise_cfg.measurement_profile_cfg.per_foot_gain.enable = True
+        structured_noise_cfg.measurement_profile_cfg.per_foot_gain.gain_range = (0.97, 1.03)
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.enable = True
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.forefoot_gain_range = (0.98, 1.02)
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.heel_gain_range = (0.98, 1.02)
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.medial_gain_range = (0.98, 1.02)
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.lateral_gain_range = (0.98, 1.02)
+        structured_noise_cfg.measurement_profile_cfg.regional_gain.edge_gain_range = (0.96, 1.00)
+        structured_noise_cfg.measurement_profile_cfg.residual_gaussian.enable = True
+        structured_noise_cfg.measurement_profile_cfg.residual_gaussian.multiplicative_std = 0.01
+        structured_noise_cfg.measurement_profile_cfg.deadzone.enable = True
+        structured_noise_cfg.measurement_profile_cfg.deadzone.force_threshold = 0.5
+        structured_noise_cfg.transport_profile_cfg.delay.enable = True
+        structured_noise_cfg.transport_profile_cfg.delay.delay_prob = 0.05
+        structured_noise_cfg.transport_profile_cfg.delay.max_delay_frames = 1
+        structured_noise_cfg.transport_profile_cfg.frame_hold.enable = True
+        structured_noise_cfg.transport_profile_cfg.frame_hold.hold_prob = 0.02
+        structured_noise_cfg.transport_profile_cfg.hysteresis.enable = True
+        structured_noise_cfg.transport_profile_cfg.hysteresis.alpha = 0.90
         # foot tactile sensor config
-        self.scene.foot_tactile = FootTactileCfg(
+        foot_tactile_cfg = FootTactileCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
             template_cfg=make_ankle_roll_foot_tactile_template_cfg(),
             taxel_z_offset=-0.038,
@@ -130,21 +156,27 @@ class ShoeConfigMixin:
                 diffusion_iters=1,
                 preserve_total_force_after_diffusion=True,
             ),
-            noise_cfg=FootTactileNoiseCfg(
-                enable=True,
-                force_relative_error_max=0.08,
-                delay_prob=0.05,
-                max_delay_frames=1,
-            ),
+            noise_cfg=structured_noise_cfg,
             update_period=0.02,
             debug_vis=False,
         )
-        self.scene.contact_stage_filter = ContactStageCfg(
+        foot_tactile_cfg.threshold_randomization_cfg.enable = True
+        foot_tactile_cfg.threshold_randomization_cfg.min_force_threshold_range = (4.5, 5.8)
+        foot_tactile_cfg.threshold_randomization_cfg.active_taxel_threshold_range = (0.40, 0.60)
+        self.scene.foot_tactile = foot_tactile_cfg
+        contact_stage_cfg = ContactStageCfg(
             prim_path="{ENV_REGEX_NS}/Robot/.*_ankle_roll_link",
             update_period=0.02,
             debug_vis=False,
             enable_self_check=False,
         )
+        contact_stage_cfg.decision_randomization_cfg.enable = True
+        contact_stage_cfg.decision_randomization_cfg.contact_force_on_range = (22.0, 28.0)
+        contact_stage_cfg.decision_randomization_cfg.contact_force_off_range = (10.5, 13.5)
+        contact_stage_cfg.decision_randomization_cfg.contact_area_on_range = (0.10, 0.14)
+        contact_stage_cfg.decision_randomization_cfg.contact_area_off_range = (0.05, 0.07)
+        contact_stage_cfg.decision_randomization_cfg.derivative_filter_alpha_range = (0.78, 0.82)
+        self.scene.contact_stage_filter = contact_stage_cfg
         self.events.bind_foot_tactile = EventTerm(
             func=mdp.bind_foot_tactile,
             mode="startup",
