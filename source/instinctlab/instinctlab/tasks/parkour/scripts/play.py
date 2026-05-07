@@ -10,6 +10,7 @@ import math
 import os
 import subprocess
 import sys
+from collections import deque
 from dataclasses import dataclass
 
 sys.path.append(os.path.join(os.getcwd(), "scripts", "instinct_rl"))
@@ -28,6 +29,8 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--terrain_num_rows", type=int, default=None, help="Override terrain generator rows.")
+parser.add_argument("--terrain_num_cols", type=int, default=None, help="Override terrain generator columns.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--exportonnx", action="store_true", default=False, help="Export policy as ONNX model.")
 parser.add_argument("--useonnx", action="store_true", default=False, help="Use the exported ONNX model for inference.")
@@ -69,6 +72,30 @@ parser.add_argument("--eval_progress_every", type=int, default=200, help="Print 
 parser.add_argument("--eval_output_dir", type=str, default=None, help="Output directory for eval logs. Default: <log_dir>/eval.")
 parser.add_argument("--eval_output_prefix", type=str, default="", help="Prefix of eval output files. Default is auto-generated.")
 parser.add_argument("--print_colliders", action="store_true", default=False, help="Print collider prims for scene inspection.")
+parser.add_argument(
+    "--com_traj_vis",
+    action="store_true",
+    default=False,
+    help="Draw the whole-body COM trajectory for a selected environment during play.",
+)
+parser.add_argument(
+    "--com_traj_env_id",
+    type=int,
+    default=0,
+    help="Environment index used for COM trajectory visualization.",
+)
+parser.add_argument(
+    "--com_traj_history_steps",
+    type=int,
+    default=200,
+    help="Maximum number of stored COM trajectory points.",
+)
+parser.add_argument(
+    "--com_traj_update_every",
+    type=int,
+    default=1,
+    help="Append a COM trajectory point every N play steps.",
+)
 
 # append Instinct-RL cli arguments
 cli_args.add_instinct_rl_args(parser)
@@ -149,6 +176,121 @@ class RunningStats:
         if self.count == 0:
             return {"count": 0, "min": None, "max": None, "mean": None}
         return {"count": self.count, "min": self.min, "max": self.max, "mean": self.mean()}
+
+
+class ComTrajectoryVisualizer:
+    """Play-time whole-body COM trail using Isaac debug draw."""
+
+    def __init__(self, env, env_id: int, history_steps: int, update_every: int) -> None:
+        self._env = env
+        self._env_id = int(env_id)
+        self._history_steps = int(history_steps)
+        self._update_every = int(update_every)
+        self._enabled = False
+        self._points: deque[torch.Tensor] = deque(maxlen=self._history_steps)
+        self._draw = None
+        self._robot = None
+        self._mass = None
+        self._mass_sum = None
+        self._line_width = 4
+        self._point_size = 18
+        self._line_rgb = (0.24, 0.86, 1.0)
+        self._point_rgba = (1.0, 0.74, 0.18, 1.0)
+
+        if self._history_steps <= 0:
+            raise ValueError("--com_traj_history_steps must be > 0.")
+        if self._update_every <= 0:
+            raise ValueError("--com_traj_update_every must be > 0.")
+        if self._env_id < 0 or self._env_id >= env.num_envs:
+            print(
+                f"[COMTraj] disabled: --com_traj_env_id must be in [0, {env.num_envs - 1}],"
+                f" got {self._env_id}."
+            )
+            return
+
+        try:
+            from isaacsim.util.debug_draw import _debug_draw as debug_draw
+        except Exception as exc:
+            print(f"[COMTraj] disabled: failed to import Isaac debug draw ({exc}).")
+            return
+
+        try:
+            self._robot = env.unwrapped.scene["robot"]
+            self._mass = self._robot.data.default_mass.to(device=env.device, dtype=torch.float32)
+            self._mass_sum = self._mass.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            self._draw = debug_draw.acquire_debug_draw_interface()
+            self._enabled = True
+            print(
+                f"[COMTraj] enabled for env_id={self._env_id}, history_steps={self._history_steps},"
+                f" update_every={self._update_every}."
+            )
+        except Exception as exc:
+            print(f"[COMTraj] disabled: failed to initialize robot COM access ({exc}).")
+            self._draw = None
+            self._robot = None
+            self._mass = None
+            self._mass_sum = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def clear(self) -> None:
+        self._points.clear()
+        if not self._enabled or self._draw is None:
+            return
+        self._draw.clear_lines()
+        self._draw.clear_points()
+
+    def update(self, step_idx: int, dones: torch.Tensor | None = None) -> None:
+        if not self._enabled:
+            return
+
+        if dones is not None:
+            tracked_done = bool(dones[self._env_id].item())
+            if tracked_done:
+                self.clear()
+                return
+
+        if step_idx % self._update_every != 0:
+            return
+
+        self._points.append(self._compute_com_world().detach().cpu())
+        self._redraw()
+
+    def _compute_com_world(self) -> torch.Tensor:
+        assert self._robot is not None
+        assert self._mass is not None
+        assert self._mass_sum is not None
+        body_com_pos_w = self._robot.data.body_com_pos_w[self._env_id].to(dtype=torch.float32)
+        body_mass = self._mass[self._env_id].unsqueeze(-1)
+        return (body_com_pos_w * body_mass).sum(dim=0) / self._mass_sum[self._env_id, 0]
+
+    def _redraw(self) -> None:
+        assert self._draw is not None
+        self._draw.clear_lines()
+        self._draw.clear_points()
+        if not self._points:
+            return
+
+        if len(self._points) >= 2:
+            point_list_1: list[tuple[float, float, float]] = []
+            point_list_2: list[tuple[float, float, float]] = []
+            colors: list[tuple[float, float, float, float]] = []
+            sizes: list[int] = []
+            point_list = list(self._points)
+            num_segments = len(point_list) - 1
+            for idx in range(num_segments):
+                fade = float(idx + 1) / float(max(num_segments, 1))
+                alpha = 0.12 + 0.88 * fade
+                point_list_1.append(tuple(float(v) for v in point_list[idx].tolist()))
+                point_list_2.append(tuple(float(v) for v in point_list[idx + 1].tolist()))
+                colors.append((self._line_rgb[0], self._line_rgb[1], self._line_rgb[2], alpha))
+                sizes.append(self._line_width)
+            self._draw.draw_lines(point_list_1, point_list_2, colors, sizes)
+
+        current_point = tuple(float(v) for v in self._points[-1].tolist())
+        self._draw.draw_points([current_point], [self._point_rgba], [self._point_size])
 
 
 def _iter_reward_groups(reward_manager) -> list[str | None]:
@@ -410,6 +552,16 @@ def _apply_runtime_env_overrides(env_cfg) -> None:
         terrain_cfg = getattr(env_cfg.scene, "terrain", None)
         if terrain_cfg is not None and hasattr(terrain_cfg, "num_envs"):
             terrain_cfg.num_envs = args_cli.num_envs
+    terrain_generator = getattr(getattr(getattr(env_cfg, "scene", None), "terrain", None), "terrain_generator", None)
+    if terrain_generator is not None:
+        if args_cli.terrain_num_rows is not None:
+            if args_cli.terrain_num_rows <= 0:
+                raise ValueError("--terrain_num_rows must be > 0.")
+            terrain_generator.num_rows = args_cli.terrain_num_rows
+        if args_cli.terrain_num_cols is not None:
+            if args_cli.terrain_num_cols <= 0:
+                raise ValueError("--terrain_num_cols must be > 0.")
+            terrain_generator.num_cols = args_cli.terrain_num_cols
 
 
 def _apply_current_eval_scene_overrides(env_cfg, current_scene_env_cfg) -> None:
@@ -826,6 +978,7 @@ def main():
     metric_sum_contact_area = torch.zeros((2,), dtype=torch.float64, device="cpu")
     stage_reward_debug_term = None
     stage_reward_debug_lookup_done = False
+    com_traj_visualizer = None
     eval_stage_sensor = None
     eval_tactile_sensor = None
     eval_stage_name_map: dict[int, str] = {}
@@ -887,6 +1040,15 @@ def main():
             )
         if "contact_stage_filter" not in env.unwrapped.scene.sensors:
             raise RuntimeError("--stage_debug requires 'contact_stage_filter' sensor in the scene.")
+    if args_cli.com_traj_vis:
+        com_traj_visualizer = ComTrajectoryVisualizer(
+            env=env,
+            env_id=args_cli.com_traj_env_id,
+            history_steps=args_cli.com_traj_history_steps,
+            update_every=args_cli.com_traj_update_every,
+        )
+        if not com_traj_visualizer.enabled:
+            com_traj_visualizer = None
     if args_cli.eval_mode:
         if args_cli.eval_max_steps <= 0:
             raise ValueError("--eval_max_steps must be > 0.")
@@ -968,6 +1130,8 @@ def main():
 
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
+            if com_traj_visualizer is not None:
+                com_traj_visualizer.update(timestep, dones=dones)
             if args_cli.eval_mode:
                 assert eval_stage_sensor is not None
                 eval_snapshot = infos.get("eval_pre_reset", None)
@@ -1511,6 +1675,8 @@ def main():
         )
 
     # close the simulator
+    if com_traj_visualizer is not None:
+        com_traj_visualizer.clear()
     env.close()
 
     if args_cli.video:

@@ -140,7 +140,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "square_gaps": terrain_gen.PerlinSquareGapTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             gap_distance_range=(0.1, 0.7),
             gap_depth=(0.4, 0.6),
             platform_width=2.5,
@@ -159,7 +159,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.15,
+            proportion=0.45,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -186,7 +186,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_high": terrain_gen.PerlinPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -213,7 +213,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.15,
+            proportion=0.45,
             step_height_range=(0.05, 0.23),
             step_width=0.3,
             platform_width=2.5,
@@ -240,7 +240,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "pyramid_stairs_inv_high": terrain_gen.PerlinInvertedPyramidStairsTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             step_height_range=(0.05, 0.45),
             step_width=1.5,
             platform_width=4.0,
@@ -267,7 +267,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "boxes": terrain_gen.PerlinDiscreteObstaclesTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             num_obstacles=20,
             obstacle_height_mode="fixed",
             obstacle_width_range=(0.8, 1.5),
@@ -292,7 +292,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "mesh_boxes": terrain_gen.PerlinMeshRandomMultiBoxTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             box_height_mean=[0.1, 0.4],
             box_height_range=0.05,
             box_length_mean=0.4,
@@ -310,7 +310,7 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
             },
         ),
         "hf_pyramid_slope_inv": terrain_gen.PerlinInvertedPyramidSlopedTerrainCfg(
-            proportion=0.10,
+            proportion=0.00,
             slope_range=(0.0, 0.7),
             platform_width=1.5,
             border_width=1.0,

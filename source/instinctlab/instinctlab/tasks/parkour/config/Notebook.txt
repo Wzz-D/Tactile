@@ -1,1 +1,40 @@
+无头测评脚本 
+  python source/instinctlab/instinctlab/tasks/parkour/scripts/eval.py \
+    --task=Instinct-Parkour-Target-Amp-G1-v0 \
+    --load_run=<run_name>
+    --eval_use_current_scene
+
+  python source/instinctlab/instinctlab/tasks/parkour/scripts/eval.py \
+    --task=Instinct-Parkour-Target-Amp-G1-v0 \
+    --load_run=<run_name> \
+    --useonnx
+
+
+无头导出脚本
+  python source/instinctlab/instinctlab/tasks/parkour/scripts/expolicy.py \
+    --task=Instinct-Parkour-Target-Amp-G1-v0 \
+    --load_run=<run_name>
+
+
+修改路径，服务器-》本地，使得本地可跑
+  python source/instinctlab/instinctlab/tasks/parkour/scripts/transform.py \
+    logs/instinct_rl/g1_parkour/run1/params/env.pkl \
+    logs/instinct_rl/g1_parkour/run2/params/env.pkl
+
+接着训练
+  python scripts/instinct_rl/train.py \
+    --headless \
+    --task=Instinct-Parkour-Target-Amp-G1-v0 \
+    --resume \
+    --load_run=<旧run> \
+    --checkpoint model_20000.pt \
+    --max_iterations 10000
+
+
+双critic任务名称
+    --task=Instinct-Parkour-Target-Amp-G1-DualCritic-v0 
+
+
+
+
 

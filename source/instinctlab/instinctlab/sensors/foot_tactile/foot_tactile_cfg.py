@@ -38,15 +38,6 @@ class FootTactileDiffusionCfg:
 
 
 @configclass
-class FootTactileThresholdRandomizationCfg:
-    """Episode-level randomization for tactile activation thresholds."""
-
-    enable: bool = False
-    min_force_threshold_range: tuple[float, float] | None = None
-    active_taxel_threshold_range: tuple[float, float] | None = None
-
-
-@configclass
 class FootTactileCfg(SensorBaseCfg):
     """Configuration for the virtual foot insole tactile sensor."""
 
@@ -76,13 +67,5 @@ class FootTactileCfg(SensorBaseCfg):
 
     diffusion_cfg: FootTactileDiffusionCfg = FootTactileDiffusionCfg()
     noise_cfg: FootTactileNoiseCfg = FootTactileNoiseCfg()
-    threshold_randomization_cfg: FootTactileThresholdRandomizationCfg = FootTactileThresholdRandomizationCfg()
+
     visualizer_cfg: VisualizationMarkersCfg = FOOT_TACTILE_VISUALIZER_CFG
-
-
-def make_tactile_threshold_randomization_cfg() -> FootTactileThresholdRandomizationCfg:
-    return FootTactileThresholdRandomizationCfg(
-        enable=True,
-        min_force_threshold_range=(4.0, 6.5),
-        active_taxel_threshold_range=(0.8, 1.2),
-    )

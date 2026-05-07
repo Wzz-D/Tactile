@@ -257,18 +257,12 @@ def _match_force_totals(
 def compute_contact_area_ratio(
     taxel_force: torch.Tensor,
     valid_taxel_mask: torch.Tensor,
-    active_threshold: float | torch.Tensor,
+    active_threshold: float,
 ) -> torch.Tensor:
     """Fraction of valid taxels whose force exceeds the active threshold."""
 
     safe_force = torch.nan_to_num(taxel_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-    if isinstance(active_threshold, torch.Tensor):
-        threshold = active_threshold.to(device=safe_force.device, dtype=safe_force.dtype)
-        if threshold.dim() == 2:
-            threshold = threshold.unsqueeze(-1)
-    else:
-        threshold = float(active_threshold)
-    active = (safe_force > threshold) & valid_taxel_mask.unsqueeze(0)
+    active = (safe_force > active_threshold) & valid_taxel_mask.unsqueeze(0)
     denom = valid_taxel_mask.sum(dim=-1).unsqueeze(0).float().clamp_min(1.0)
     ratio = active.float().sum(dim=-1) / denom
     return torch.nan_to_num(ratio, nan=0.0, posinf=0.0, neginf=0.0)
@@ -310,7 +304,11 @@ def compute_cop_b(
     taxel_xy_b: torch.Tensor,
     valid_taxel_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Center of pressure in local foot plane."""
+    """Center of pressure in local foot plane.
+
+    ``taxel_xy_b`` may be either geometry coordinates with shape ``(B, T, 2)`` or
+    measured coordinates with shape ``(N, B, T, 2)``.
+    """
 
     safe_force = torch.nan_to_num(taxel_force, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
     masked_force = safe_force * valid_taxel_mask.unsqueeze(0).float()
@@ -319,7 +317,7 @@ def compute_cop_b(
     elif taxel_xy_b.dim() == 4:
         taxel_xy = taxel_xy_b
     else:
-        raise ValueError(f"taxel_xy_b must have 3 or 4 dims, got shape {tuple(taxel_xy_b.shape)}")
+        raise ValueError("taxel_xy_b must have shape (B, T, 2) or (N, B, T, 2)")
     weighted_xy = masked_force.unsqueeze(-1) * taxel_xy
     cop = weighted_xy.sum(dim=-2) / (masked_force.sum(dim=-1, keepdim=True) + 1e-6)
     return torch.nan_to_num(cop, nan=0.0, posinf=0.0, neginf=0.0)
